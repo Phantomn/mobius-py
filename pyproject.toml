@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mobius-py"
+version = "0.1.0"
+description = "Claude Code 계정 전환/자동 fallback CLI (Linux) — macOS Mobius의 Python 포팅"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Ph4nt0m" }]
+license = "MIT"
+license-files = ["LICENSE"]
+# 런타임 의존성 0 — HTTP는 urllib, TZ는 zoneinfo(stdlib)
+dependencies = []
+
+# 원본: chussum/mobius (Swift/macOS, MIT). 포팅 기준 v0.5.1 (b6dcd0e, 2026-08-10).
+[project.urls]
+Upstream = "https://github.com/chussum/mobius"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+mobius = "mobius.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mobius*"]
