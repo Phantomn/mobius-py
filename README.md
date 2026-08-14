@@ -37,7 +37,8 @@ Linux의 Claude Code는 자격증명을 **Keychain이 아니라 `~/.claude/.cred
 ## 설치
 
 ```bash
-pip install --user -e /home/phantom/mobius-py    # 또는 배포 후 pip install mobius-py
+git clone https://github.com/Phantomn/mobius-py.git
+pip install --user -e mobius-py
 ```
 
 `mobius` 명령이 PATH에 생긴다. (설치 없이 `PYTHONPATH=. python3 -m mobius ...` 로도 실행 가능)
