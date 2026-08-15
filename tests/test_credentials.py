@@ -39,6 +39,27 @@ def test_is_refresh_token_expired():
     assert credentials.is_refresh_token_expired(nb, now=1e12) is False
 
 
+def test_refresh_token_rotated():
+    """딱지 해제 근거는 **refresh 토큰 값의 교체**뿐 — 그 외에는 보수적으로 유지."""
+    a = blob(refreshToken="R0")
+    b = blob(refreshToken="R1")
+
+    assert credentials.refresh_token_rotated(a, b) is True     # 회전 = 살아있다는 증거
+
+    # 같은 토큰인데 다른 필드만 바뀜 → 유지. 라이브싱크가 5분마다 되저장하므로
+    # 바이트 비교로 판정하면 죽은 계정의 딱지가 조용히 풀린다.
+    assert credentials.refresh_token_rotated(a, blob(refreshToken="R0",
+                                                     accessToken="다름")) is False
+    assert credentials.refresh_token_rotated(a, a) is False
+
+    # 모르면 유지 — 이전 스냅샷 없음/파싱 불가/토큰 없음(빈 문자열 포함)
+    assert credentials.refresh_token_rotated(None, b) is False
+    assert credentials.refresh_token_rotated(b"not json", b) is False
+    assert credentials.refresh_token_rotated(a, b"not json") is False
+    assert credentials.refresh_token_rotated(a, blob(refreshToken="")) is False
+    assert credentials.refresh_token_rotated(blob(refreshToken=""), b) is False
+
+
 def test_rebuild_preserves_other_fields():
     b = blob()
     t = RefreshedTokens(access_token="NEW", refresh_token="NEWRT", expires_at_ms=123,

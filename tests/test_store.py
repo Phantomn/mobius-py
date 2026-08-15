@@ -80,6 +80,30 @@ def test_rotating_secret_clears_needs_reauth(env):
     assert AccountStore(env).file.accounts[0].needs_reauth is False
 
 
+def test_secret_rewrite_keeps_reauth_when_refresh_token_unchanged(env):
+    """refresh 토큰이 그대로면 다른 바이트가 바뀌어도 딱지를 유지한다.
+
+    `refresh_active_snapshot_if_stable` 이 활성 계정 스냅샷을 5분마다 무조건 되저장한다.
+    죽은 계정도 mcpOAuth 등 Claude 인증과 무관한 필드가 바뀌면 blob 은 달라지므로,
+    바이트 비교로 해제하면 죽은 계정의 딱지가 조용히 풀리고 엔진이 정상 후보로 취급한다.
+    (upstream 이슈 #14 리뷰에서 지적된 회귀 — 실제로 이 포팅본에 있었다.)
+    """
+    store = AccountStore(env)
+    same_rt = "rt-FIXED"
+    p = store.upsert_profile("a", CredentialsSnapshot(
+        credentials_blob=creds_blob("A", refresh_token=same_rt),
+        oauth_account={"emailAddress": "a@example.com"}))
+    store.set_needs_reauth(p.id, True)
+
+    # 토큰은 동일, 나머지 바이트만 다른 스냅샷 재저장 (라이브싱크가 하는 일)
+    store.set_secret(CredentialsSnapshot(
+        credentials_blob=creds_blob("B", refresh_token=same_rt),
+        oauth_account={"emailAddress": "a@example.com"}), p.id)
+
+    assert store.file.accounts[0].needs_reauth is True
+    assert AccountStore(env).file.accounts[0].needs_reauth is True
+
+
 def test_reload_reflects_external_change(env):
     store = AccountStore(env)
     store.upsert_profile("a", _snap())

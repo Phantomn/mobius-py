@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from typing import Callable, Optional
 
+from . import credentials
 from .env import MobiusEnvironment
 from .fsutil import write_atomic
 from .models import AccountProfile, AccountsFile, CredentialsSnapshot, new_account_id
@@ -115,12 +116,15 @@ class AccountStore:
 
     def set_secret(self, snapshot: CredentialsSnapshot, account_id: str) -> None:
         # needsReauth 는 "저장된 refresh 토큰이 폐기됨"이라는 **그 토큰에 대한** 판정이다.
-        # 토큰이 바뀌면 판정의 전제가 사라지므로 딱지도 함께 내린다. 이 해제가 없으면
-        # 재로그인/토큰 회전 뒤에도 딱지가 남고, 딱지 붙은 계정은 데몬 선제 스윕
+        # 토큰이 다른 값으로 교체되면 판정의 전제가 사라지므로 딱지를 내린다. 이 해제가
+        # 없으면 재로그인/토큰 회전 뒤에도 딱지가 남고, 딱지 붙은 계정은 데몬 선제 스윕
         # (needs_reauth → skip)과 체커(활성 → NOT_FALLBACK) 양쪽에서 제외되어
-        # 다시는 검사되지 않는다 = 영구 고착.
-        prev = self.secret(account_id)
-        rotated = prev is None or prev.credentials_blob != snapshot.credentials_blob
+        # 다시는 검사되지 않는다 = 일방향 래치.
+        # ★ 순서 주의: 값싼 플래그 검사를 먼저 하고, 이전 스냅샷 읽기는 딱지가 붙어 있을
+        #   때만 한다. 딱지는 드물다 — 정상 계정이 5분 라이브싱크마다 파일을 더 읽을 이유가 없다.
+        profile = next((a for a in self.file.accounts if a.id == account_id), None)
+        flagged = profile is not None and profile.needs_reauth
+        prev = self.secret(account_id) if flagged else None
 
         self.env.secrets_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -130,11 +134,9 @@ class AccountStore:
         data = json.dumps(snapshot.to_dict()).encode("utf-8")
         write_atomic(data, self.env.secret_file(account_id), 0o600)
 
-        if rotated:
-            try:
-                self.set_needs_reauth(account_id, False)
-            except UnknownAccount:
-                pass  # 프로필 등록 전 스냅샷 저장 — 이후 upsert_profile 이 False 로 만든다
+        if flagged and credentials.refresh_token_rotated(
+                prev.credentials_blob if prev else None, snapshot.credentials_blob):
+            self.set_needs_reauth(account_id, False)
 
     # ---------- 상태 변경 ----------
 

@@ -93,6 +93,31 @@ def is_refresh_token_expired(blob: bytes, now: float) -> bool:
     return exp < now
 
 
+def refresh_token_rotated(previous: Optional[bytes], nxt: bytes) -> bool:
+    """needsReauth 딱지를 내려도 되는가 — refresh 토큰이 **다른 값으로 교체**됐는가.
+
+    딱지의 의미는 정확히 하나다: **저장된 *그* refresh 토큰이 폐기됐다**(invalid_grant,
+    시간 만료, 빈 토큰, 회전본 저장 실패). 그러므로 그 토큰이 다른 값으로 바뀌면 판정의
+    전제가 사라진다. 교체가 일어나는 경로는 둘뿐이고 둘 다 살아있다는 증거다 —
+    성공한 refresh(서버가 old 토큰을 소비하고 새 토큰을 발급) 또는 새 로그인.
+
+    ★ **"저장 바이트가 바뀌면 해제"로 넓히지 말 것** — `refresh_active_snapshot_if_stable`이
+      활성 계정 스냅샷을 5분마다 **무조건** 되저장한다. 계정이 진짜 죽어도 mcpOAuth 등
+      Claude 인증과 무관한 필드가 바뀌면 blob은 달라지므로, 바이트를 신호로 삼으면 죽은
+      계정의 딱지가 조용히 풀리고 엔진이 정상 후보로 취급한다(upstream 이슈 #14 리뷰 지적).
+
+    파싱 불가·토큰 없음(빈 문자열 포함)이면 **False**로 보수적으로 물러난다 — 모르면
+    딱지를 유지한다(살아있다고 단정하지 않는다).
+    """
+    if previous is None:
+        return False
+    old = refresh_token(previous)
+    new = refresh_token(nxt)
+    if old is None or new is None:
+        return False
+    return old != new
+
+
 def rebuild(blob: bytes, tokens: RefreshedTokens) -> Optional[bytes]:
     """갱신된 토큰을 blob에 반영해 새 blob 바이트를 만든다(다른 필드 보존)."""
     obj = _loads(blob)
