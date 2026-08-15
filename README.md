@@ -51,6 +51,8 @@ mobius list              # 등록된 계정 목록 (● = 현재 활성)
 mobius switch <이름>      # 해당 계정으로 전환
 mobius status            # 현재 활성 계정 + 자동 전환 상태
 mobius auto on|off       # 자동 fallback 켜기/끄기
+mobius advisory          # 한도 차기 전 미리 전환 설정 보기
+mobius advisory on --threshold 90   # 켜기 + 임계값(50~95)
 mobius auto --watch      # 자동 전환 데몬을 foreground 실행 (세션 로그 감시)
 mobius auto --install-service   # systemd user unit 생성
 ```
@@ -73,6 +75,25 @@ journalctl --user -u mobius -f      # 로그
 데몬은 3초마다 `~/.claude/projects/**/*.jsonl` 세션 로그를 감시한다(네트워크 0).
 활성 계정이 한도에 걸린 이벤트를 감지하면, 전환 직전 대상 fallback의 OAuth refresh로
 생사를 확인한 뒤 살아있는 계정으로 전환한다. primary 리셋 시각이 지나면 자동 복귀한다.
+
+### 한도 차기 전 미리 전환 (기본 꺼짐)
+
+활성 계정의 5시간 사용량이 임계값(기본 90%)에 이르면 100%가 되기 전에 여유 있는 폴백으로
+미리 옮긴다. 켜면 **5분마다 활성 계정 사용량을 조회한다**(네트워크) — 꺼져 있으면 조회 0.
+
+```bash
+mobius advisory on               # 임계값 90%로 켜기
+mobius advisory --threshold 85   # 임계값만 조정
+mobius advisory off
+```
+
+- 경고는 **소진과 별도 상태**다. `mobius list`의 "한도 소진" 표시나 자동 전환의 소진 판정에
+  절대 섞이지 않는다 — 섞이면 표시와 알림이 거짓말을 하게 된다.
+- 자동 전환(`mobius auto`)이 꺼져 있으면 **알림만** 오고 전환하지 않는다.
+- 경고를 보고 나서 `mobius switch`로 그 계정에 **일부러 돌아오면 머문다.** 경고 이전에
+  눌러둔 핀은 거부권이 없다(옛 핀이 새 경고를 영구히 막지 않도록).
+- 갈 곳이 없으면 조용히 머문다. 후보를 못 찾으면 15분간 재탐색하지 않는다.
+- 경계에서 깜빡이지 않도록 5포인트 히스테리시스를 쓴다(90%에 세우고 85% 이하에서 해제).
 
 ## 동작 원칙 (macOS 원본에서 계승)
 

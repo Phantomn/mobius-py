@@ -67,7 +67,8 @@ def _cmd_switch(args) -> int:
         print(f"전환 실패: {e}", file=sys.stderr)
         return 1
     # 사용자가 직접 고른 계정 — 모델 전용 한도로 자동으로 밀어내지 않고, 자동 복귀 대상도 아니다.
-    ctx.store.set_user_pinned(target.id)
+    # 시각을 함께 찍는다: "경고를 보고 나서 돌아온 핀"만 advisory 전환 거부권을 갖는다.
+    ctx.store.set_user_pinned(target.id, time.time())
     ctx.store.set_auto_switched_from_primary(False)
     print(f"전환 완료 → {target.nickname} <{target.email_address}>")
     print("실행 중인 claude 세션엔 즉시 적용되지 않을 수 있습니다 — 그 경우 세션을 새로 시작하세요.")
@@ -103,6 +104,37 @@ def _cmd_status(_args) -> int:
     role = "primary" if primary and active.id == primary.id else "fallback"
     print(f"활성: {active.nickname} <{active.email_address}> ({role}){_fmt_reset(active, now)}")
     print(f"자동 전환: {'켜짐' if ctx.store.file.auto_switch_enabled else '꺼짐'}")
+    f = ctx.store.file
+    if f.advisory_enabled:
+        print(f"미리 전환: 켜짐 (임계값 {f.advisory_threshold:g}%)")
+        if active.has_active_advisory(now):
+            print(f"  ⚠️ 현재 {active.advisory.utilization:g}% — 한도가 가까워요")
+    else:
+        print("미리 전환: 꺼짐")
+    return 0
+
+
+def _cmd_advisory(args) -> int:
+    ctx = _Ctx()
+    f = ctx.store.file
+    if args.mode is None and args.threshold is None:
+        print(f"미리 전환: {'켜짐' if f.advisory_enabled else '꺼짐'} "
+              f"(임계값 {f.advisory_threshold:g}%)")
+        print("사용법: mobius advisory on|off | --threshold <50~95>")
+        return 0
+    threshold = None
+    if args.threshold is not None:
+        if not (50 <= args.threshold <= 95):
+            print("임계값은 50~95 사이여야 합니다.", file=sys.stderr)
+            return 1
+        threshold = float(args.threshold)
+    enabled = None if args.mode is None else (args.mode == "on")
+    ctx.store.set_advisory_config(enabled=enabled, threshold=threshold)
+    f = ctx.store.file
+    print(f"미리 전환: {'켜짐' if f.advisory_enabled else '꺼짐'} "
+          f"(임계값 {f.advisory_threshold:g}%)")
+    if f.advisory_enabled:
+        print("※ 활성 계정 사용량을 5분마다 조회합니다(네트워크). 자동 전환이 꺼져 있으면 알림만 옵니다.")
     return 0
 
 
@@ -188,6 +220,12 @@ def _build_parser() -> argparse.ArgumentParser:
     cap = sub.add_parser("capture", help="현재 claude 로그인 계정을 프로필로 캡처")
     cap.add_argument("name", help="저장할 닉네임")
     cap.set_defaults(func=_cmd_capture)
+
+    ad = sub.add_parser("advisory", help="한도 차기 전 미리 전환 (기본 꺼짐)")
+    ad.add_argument("mode", nargs="?", choices=["on", "off"], help="on 또는 off")
+    ad.add_argument("--threshold", type=float, metavar="PCT",
+                    help="선제 전환 임계값 %% (50~95, 기본 90)")
+    ad.set_defaults(func=_cmd_advisory)
 
     au = sub.add_parser("auto", help="자동 fallback 켜기/끄기/데몬")
     au.add_argument("mode", nargs="?", choices=["on", "off"], help="on 또는 off")

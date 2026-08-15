@@ -35,6 +35,41 @@ class RateLimitInfo:
 
 
 @dataclass
+class AdvisoryRecord:
+    """임계값 선제 경고 — **소진이 아니다.** rate_limit 과 같은 레코드에 플래그를 얹지 않고
+    별도 필드로 두는 이유: 같은 레코드에 얹으면 모든 소비자가 그 플래그를 각자 알아야 하는
+    버그 클래스가 된다(메뉴바·CLI·알림이 "소진"이라고 거짓말하게 된다).
+    """
+
+    utilization: float      # 경고를 유발한 사용률(%)
+    resets_at: float        # 경고가 걸린 창의 리셋 시각 — 지나면 자동 무효(시간 게이트)
+    detected_at: float      # 처음 경고가 올라온 시각. 수동 핀의 거부권 판정에 쓴다.
+
+    # 경계에서 사용률이 오르내릴 때 경고가 깜빡이며 알림·후보 탐색 백오프를 매번
+    # 리셋하는 것을 막는 히스테리시스 폭(포인트).
+    HYSTERESIS = 5.0
+
+    def to_dict(self) -> dict:
+        return {"utilization": self.utilization, "resetsAt": self.resets_at,
+                "detectedAt": self.detected_at}
+
+    @staticmethod
+    def from_dict(d: dict) -> "AdvisoryRecord":
+        return AdvisoryRecord(utilization=float(d["utilization"]),
+                              resets_at=float(d["resetsAt"]),
+                              detected_at=float(d["detectedAt"]))
+
+    @staticmethod
+    def should_set(utilization: float, threshold: float) -> bool:
+        return utilization >= threshold
+
+    @staticmethod
+    def should_clear(utilization: float, threshold: float) -> bool:
+        """임계값 - 5 이하. 둘 사이(밴드 내부)면 set 도 clear 도 False → 기존 상태 유지."""
+        return utilization <= threshold - AdvisoryRecord.HYSTERESIS
+
+
+@dataclass
 class AccountProfile:
     id: str
     nickname: str
@@ -46,6 +81,11 @@ class AccountProfile:
     has_desktop_snapshot: bool = False
     # 사용자가 이 계정을 직접(수동) 골랐는가. true면 모델 전용 한도(Fable 등)로는 밀어내지 않는다.
     user_pinned: bool = False
+    # 핀을 세운 시각. 플래그만으로는 "경고를 보고 나서 일부러 돌아온 핀"과 "몇 시간 전에 그냥
+    # 눌러둔 핀"을 구분할 수 없다 — advisory 전환의 거부권은 전자에게만 준다.
+    pinned_at: Optional[float] = None
+    # 임계값 선제 경고(소진 아님). **엔진의 advisory 경로만** 읽는다 — 아래 주석 참조.
+    advisory: Optional[AdvisoryRecord] = None
 
     def to_dict(self) -> dict:
         return {
@@ -58,11 +98,15 @@ class AccountProfile:
             "rateLimit": self.rate_limit.to_dict() if self.rate_limit else None,
             "hasDesktopSnapshot": self.has_desktop_snapshot,
             "userPinned": self.user_pinned,
+            "pinnedAt": self.pinned_at,
+            "advisory": self.advisory.to_dict() if self.advisory else None,
         }
 
     @staticmethod
     def from_dict(d: dict) -> "AccountProfile":
         rl = d.get("rateLimit")
+        ad = d.get("advisory")
+        pinned_at = d.get("pinnedAt")
         return AccountProfile(
             id=str(d["id"]),
             nickname=str(d["nickname"]),
@@ -73,6 +117,8 @@ class AccountProfile:
             rate_limit=RateLimitInfo.from_dict(rl) if rl else None,
             has_desktop_snapshot=bool(d.get("hasDesktopSnapshot", False)),
             user_pinned=bool(d.get("userPinned", False)),
+            pinned_at=float(pinned_at) if isinstance(pinned_at, (int, float)) else None,
+            advisory=AdvisoryRecord.from_dict(ad) if ad else None,
         )
 
     def is_limited(self, now: float) -> bool:
@@ -80,6 +126,17 @@ class AccountProfile:
         if self.rate_limit is None:
             return False
         return now < self.rate_limit.resets_at
+
+    def has_active_advisory(self, now: float) -> bool:
+        """임계값 선제 경고가 지금 유효한가(경고가 걸린 창의 리셋 전인가).
+
+        `is_limited` 와 시간 게이트 모양은 같지만 **의미가 다르다 — 소진이 아니라
+        "곧 찰 것 같다"이다.**
+        ★ `is_limited`·`auto_switch_may_leave`·CLI 표시에서 **절대 읽지 말 것.** 그 셋은
+          "이 계정을 지금 쓸 수 없다"는 정직한 신호라, 경고가 섞이는 순간 표시와 알림 문구가
+          거짓말을 한다. 소비자는 엔진의 advisory 경로뿐이다.
+        """
+        return self.advisory is not None and now < self.advisory.resets_at
 
     def auto_switch_may_leave(self, now: float) -> bool:
         """자동 전환이 이 계정을 밀어내도 되는가. 모델 전용 한도 + 사용자 핀이면 밀어내지 않는다."""
@@ -102,6 +159,9 @@ class AccountsFile:
     desktop_auto_switch_enabled: bool = False
     # 현재 fallback 활성이 "자동 전환"의 결과인가. onTick의 primary 자동 복귀는 이게 true일 때만.
     auto_switched_from_primary: bool = False
+    # 한도 차기 전 미리 전환 — 기본 꺼짐. 켜면 5분마다 활성 계정 사용량을 조회한다(네트워크).
+    advisory_enabled: bool = False
+    advisory_threshold: float = 90.0    # 50~95
 
     def to_dict(self) -> dict:
         return {
@@ -111,6 +171,8 @@ class AccountsFile:
             "desktopSyncEnabled": self.desktop_sync_enabled,
             "desktopAutoSwitchEnabled": self.desktop_auto_switch_enabled,
             "autoSwitchedFromPrimary": self.auto_switched_from_primary,
+            "advisoryEnabled": self.advisory_enabled,
+            "advisoryThreshold": self.advisory_threshold,
         }
 
     @staticmethod
@@ -122,6 +184,8 @@ class AccountsFile:
             desktop_sync_enabled=bool(d.get("desktopSyncEnabled", True)),
             desktop_auto_switch_enabled=bool(d.get("desktopAutoSwitchEnabled", False)),
             auto_switched_from_primary=bool(d.get("autoSwitchedFromPrimary", False)),
+            advisory_enabled=bool(d.get("advisoryEnabled", False)),
+            advisory_threshold=float(d.get("advisoryThreshold", 90.0)),
         )
 
     @property

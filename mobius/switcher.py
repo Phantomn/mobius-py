@@ -36,21 +36,31 @@ class Switcher:
         self.store.set_secret(live, profile.id)
         return profile.id
 
-    def refresh_active_snapshot_if_stable(self) -> None:
-        """활성 계정 스냅샷을 라이브(갱신된 토큰)와 동기화한다. 안정 읽기로 레이스 회피."""
+    def refresh_active_snapshot_if_stable(self) -> bool:
+        """활성 계정 스냅샷을 라이브(갱신된 토큰)와 동기화한다. 안정 읽기로 레이스 회피.
+
+        반환: **이번 호출에서 실제로 새 스냅샷을 썼는지.** 호출자는 이 값으로 "활성 계정의
+        저장 secret 이 이번 사이클 기준으로 신선하다"를 알고, 그 덕에 라이브를 한 번 더
+        읽지 않는다(임계값 폴이 이 계약에 얹힌다). 그래서 이 불리언은 **신선도 계약** 자체다 —
+        쓰기가 실패했는데 True 를 돌려주면 호출자가 낡은 스냅샷을 신선하다고 믿고 조용히 틀린다.
+        """
         email = self.io.live_email()
         if email is None:
-            return
+            return False
         profile = next((a for a in self.store.file.accounts if a.email_address == email), None)
         if profile is None or profile.id != self.store.file.active_account_id:
-            return
+            return False
         stable = self.io.read_stable_live_snapshot()
         if stable is None:
-            return
+            return False
         live, stable_email = stable
         if stable_email != email:
-            return
-        self.store.set_secret(live, profile.id)
+            return False
+        try:
+            self.store.set_secret(live, profile.id)
+            return True
+        except Exception:
+            return False  # 디스크 실패 등 — 신선하다고 보고하면 안 된다(위 계약 참조)
 
     def switch_to(self, account_id: str) -> None:
         if not any(a.id == account_id for a in self.store.file.accounts):

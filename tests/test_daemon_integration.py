@@ -148,6 +148,95 @@ def test_daemon_skips_usage_when_already_limited(env):
     assert calls == []
 
 
+# ---------- 임계값 선제 전환 ----------
+
+def _usage_pct(pct, resets="2023-11-15T06:00:00Z"):   # NOW(=2023-11-14T22:13:20Z) 이후
+    return json.dumps({"five_hour": {"utilization": pct, "resets_at": resets}}).encode()
+
+
+def _advisory_daemon(env, threshold=90.0, auto=True):
+    """A(활성 라이브) + B(폴백), 미리 전환 켜짐. 5분 싱크가 즉시 돌게 세팅."""
+    write_live(env, tag="A", email="a@example.com")
+    d = Daemon(env)
+    d.fallback_checker.refresher = FakeRefresher()
+    a = d.store.upsert_profile("a", d.io.read_live_snapshot())
+    b = d.store.upsert_profile("b", CredentialsSnapshot(
+        credentials_blob=creds_blob("B"), oauth_account={"emailAddress": "b@example.com"}))
+    d.store.set_active(a.id)
+    d.store.set_advisory_config(enabled=True, threshold=threshold)
+    d.store.set_auto_switch(auto)
+    (env.projects_dir / "p").mkdir(parents=True)
+    return d, a, b
+
+
+def test_advisory_set_and_preswitch(env):
+    """임계값 도달 → advisory 세팅 → 여유 있는 폴백으로 **미리** 전환."""
+    d, a, b = _advisory_daemon(env)
+    # 활성 A는 92%, 후보 B는 10% (같은 transport 로 순차 응답)
+    responses = [_usage_pct(92.0), _usage_pct(10.0)]
+    d.usage_transport = lambda t: (200, responses.pop(0) if responses else _usage_pct(10.0))
+
+    d.tick(NOW)
+
+    d.store.reload()
+    assert d.store.file.active_account_id == b.id
+    assert d.store.file.auto_switched_from_primary is True
+
+
+def test_advisory_never_leaks_into_is_limited(env):
+    """advisory 는 소진이 아니다 — is_limited/rate_limit 에 절대 새면 안 된다."""
+    d, a, b = _advisory_daemon(env, auto=False)   # 전환은 막고 advisory 만 세우게
+    d.usage_transport = lambda t: (200, _usage_pct(92.0))
+
+    d.tick(NOW)
+
+    d.store.reload()
+    p = next(x for x in d.store.file.accounts if x.id == a.id)
+    assert p.advisory is not None and p.advisory.utilization == 92.0
+    assert p.rate_limit is None          # 소진 기록은 만들지 않는다
+    assert p.is_limited(NOW) is False    # 표시·엔진의 "쓸 수 없다" 신호는 그대로
+    assert p.has_active_advisory(NOW) is True
+
+
+def test_advisory_hysteresis_band_keeps_state(env):
+    """밴드 내부(임계값-5 < util < 임계값)에서는 기존 상태를 유지한다."""
+    d, a, b = _advisory_daemon(env, auto=False)
+    d.usage_transport = lambda t: (200, _usage_pct(92.0))
+    d.tick(NOW)
+    d.store.reload()
+    assert d.store.file.accounts[0].advisory is not None
+
+    # 87% — 밴드 내부(85 < 87 < 90). 해제되면 안 된다.
+    d._last_active_sync = float("-inf")
+    d.usage_transport = lambda t: (200, _usage_pct(87.0))
+    d.tick(NOW + 1)
+    d.store.reload()
+    assert d.store.file.accounts[0].advisory is not None
+
+    # 84% — 밴드 아래(90-5=85 이하) → 해제
+    d._last_active_sync = float("-inf")
+    d.usage_transport = lambda t: (200, _usage_pct(84.0))
+    d.tick(NOW + 2)
+    d.store.reload()
+    assert d.store.file.accounts[0].advisory is None
+
+
+def test_advisory_off_by_default_no_network(env):
+    """기본 꺼짐 — usage 를 조회하지 않는다."""
+    write_live(env, tag="A", email="a@example.com")
+    d = Daemon(env)
+    calls = []
+    d.usage_transport = lambda t: calls.append(t) or (200, _usage_pct(99.0))
+    a = d.store.upsert_profile("a", d.io.read_live_snapshot())
+    d.store.set_active(a.id)
+    (env.projects_dir / "p").mkdir(parents=True)
+
+    d.tick(NOW)
+
+    assert d.store.file.advisory_enabled is False
+    assert calls == []
+
+
 def test_daemon_clears_expired_rate_limit(env):
     """리셋 지난 rateLimit 레코드는 지워진다 — 남으면 지난 한도를 계속 참조한다."""
     write_live(env, tag="A", email="a@example.com")

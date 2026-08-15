@@ -7,12 +7,14 @@ accounts.corrupt.json 으로 백업한 뒤 예외를 올린다(빈 스토어가 
 from __future__ import annotations
 
 import json
+import time
 from typing import Callable, Optional
 
 from . import credentials
 from .env import MobiusEnvironment
 from .fsutil import write_atomic
-from .models import AccountProfile, AccountsFile, CredentialsSnapshot, new_account_id
+from .models import (AccountProfile, AccountsFile, AdvisoryRecord, CredentialsSnapshot,
+                     new_account_id)
 
 
 class AccountStoreError(Exception):
@@ -148,6 +150,14 @@ class AccountStore:
         self.file.auto_switch_enabled = enabled
         self.save()
 
+    def set_advisory_config(self, enabled: Optional[bool] = None,
+                            threshold: Optional[float] = None) -> None:
+        if enabled is not None:
+            self.file.advisory_enabled = enabled
+        if threshold is not None:
+            self.file.advisory_threshold = threshold
+        self.save()
+
     def set_auto_switched_from_primary(self, flagged: bool) -> None:
         self.file.auto_switched_from_primary = flagged
         self.save()
@@ -159,13 +169,37 @@ class AccountStore:
         p.needs_reauth = flag
         self.save()
 
-    def set_user_pinned(self, account_id: str) -> None:
-        """지정 계정에만 핀을 세운다(나머지 해제). 변화 있을 때만 저장."""
+    def set_advisory(self, account_id: str, record: Optional[AdvisoryRecord]) -> None:
+        """임계값 선제 경고 세팅/해제. **변화 없으면 저장하지 않는다.**
+
+        ★ 동등성 스킵은 미세 최적화가 아니라 필수다: 5분 폴링마다 호출되므로 무조건 쓰면
+          accounts.json 이 데몬이 도는 내내 다시 쓰인다.
+        """
+        p = self._find(account_id)
+        if p.advisory == record:
+            return
+        p.advisory = record
+        self.save()
+
+    def set_user_pinned(self, account_id: str, now: Optional[float] = None) -> None:
+        """지정 계정에만 핀을 세운다(나머지 해제). 변화 있을 때만 저장.
+
+        ★ pinned_at 은 **매 호출 갱신한다 — 이미 핀된 계정을 다시 핀해도 마찬가지.**
+          플래그만으로는 "경고를 보고 나서 일부러 이 계정으로 돌아왔다"와 "몇 시간 전에 그냥
+          눌러뒀다"를 구분할 수 없다. advisory 전환은 pinned_at 이 advisory.detected_at 보다
+          **나중일 때만** 거부되므로, 갱신을 빠뜨리면 옛 핀이 새 경고까지 영구히 거부해
+          선제 전환이 죽는다.
+        """
+        stamp = time.time() if now is None else now
         changed = False
         for a in self.file.accounts:
             want = a.id == account_id
+            want_at = stamp if want else None
             if a.user_pinned != want:
                 a.user_pinned = want
+                changed = True
+            if (a.pinned_at is not None) != want or (want and a.pinned_at != want_at):
+                a.pinned_at = want_at
                 changed = True
         if changed:
             self.save()

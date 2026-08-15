@@ -12,12 +12,13 @@ import time
 from typing import Optional
 
 from . import credentials, usage
-from .autoswitch import AutoSwitchEngine, Decision, DecisionKind, SwitchReason
+from .autoswitch import (AutoSwitchEngine, CandidateProbeAction, Decision, DecisionKind,
+                         SwitchReason)
 from .claude_config import ClaudeConfigIO
 from .env import MobiusEnvironment
 from .fallback_check import FallbackAuthChecker, FallbackCheckResult
 from .log_watcher import SessionLogWatcher
-from .models import RateLimitInfo
+from .models import AdvisoryRecord, RateLimitInfo
 from .ratelimit_parser import RateLimitHit
 from .notify import notify
 from .store import AccountStore
@@ -37,6 +38,9 @@ REAUTH_RECHECK_INTERVAL = 30 * 60.0
 # 지연 hit 에 매번 조회하지 않기 위한 것 — 소진으로 판정되면 기록이 남아 이 게이트 이전에
 # 걸린다(is_limited). 짧게 잡는다: 진짜 소진은 즉시 잡아야 자동 전환이 늦지 않는다.
 USAGE_VERIFY_COOLDOWN = 60.0
+# 후보 탐색에서 만료된 폴백 토큰을 refresh 로 승격할 때의 계정당 재시도 쿨다운.
+# transient 실패가 5분마다 회전 시도로 반복되지 않게 한다.
+PROBE_REFRESH_COOLDOWN = 30 * 60.0
 
 _DEAD_RESULTS = {
     FallbackCheckResult.DEAD, FallbackCheckResult.LOCALLY_DEAD,
@@ -59,6 +63,9 @@ class Daemon:
         self._last_proactive_refresh: dict[str, float] = {}
         self._last_reauth_recheck: dict[str, float] = {}
         self._last_usage_verify: dict[str, float] = {}
+        self._last_usage_refresh_attempt: dict[str, float] = {}
+        self._last_advised_resets_at: dict[str, float] = {}
+        self._last_no_candidate_at: Optional[float] = None
         # usage 조회 transport — 테스트가 네트워크 없이 주입한다(None = 실제 HTTP).
         self.usage_transport = None
         self._stop = False
@@ -97,9 +104,16 @@ class Daemon:
         if now - self._last_active_sync >= ACTIVE_SNAPSHOT_SYNC_INTERVAL:
             self._last_active_sync = now
             try:
-                self.switcher.refresh_active_snapshot_if_stable()
+                synced = self.switcher.refresh_active_snapshot_if_stable()
             except Exception:
-                pass
+                synced = False
+            # 임계값 폴은 **싱크 성사 뒤에만** — 저장 secret 이 방금 갱신됐으므로 라이브를
+            # 한 번 더 읽지 않는다(같은 5분 블록이 라이브 자격증명 1회를 나눠 쓴다).
+            if synced and self.store.file.advisory_enabled:
+                try:
+                    self._poll_threshold(now)
+                except Exception as e:
+                    print(f"[mobius] 임계값 폴 오류: {e}", flush=True)
 
         self._clear_expired_rate_limits(now)
         self._recheck_flagged_accounts(now)
@@ -138,11 +152,17 @@ class Daemon:
             name = self._nick(decision.target_id)
             notify("한도 소진 — 자동 전환이 꺼져 있습니다", f"{name} 계정이 한도에 도달했습니다. 수동으로 전환하세요.")
             return
+        if decision.kind == DecisionKind.NOTIFY_ADVISORY_ONLY:
+            # ★ 소진이 **아니다** — 문구에 소진 표현을 쓰면 거짓말이 된다.
+            name = self._nick(decision.target_id)
+            notify(f"⚠️ {name} 계정 한도가 가까워요",
+                   "설정한 임계값에 도달했어요. 자동 전환이 꺼져 있으니 필요하면 직접 전환하세요.")
+            return
         # SWITCH_TO
         target_id = decision.target_id
         reason = decision.reason
         # 자동 폴백으로 넘어가기 직전 실제 refresh로 대상 생사 확인 → 죽었으면 취소
-        if reason == SwitchReason.ACTIVE_EXHAUSTED:
+        if reason in (SwitchReason.ACTIVE_EXHAUSTED, SwitchReason.THRESHOLD_ADVISORY):
             if not self._preflight_fallback(target_id, now):
                 return
         from_id = self.store.file.active_account_id
@@ -153,15 +173,126 @@ class Daemon:
             return
         self.engine.note_switched(now)
         try:
-            self.store.set_auto_switched_from_primary(reason == SwitchReason.ACTIVE_EXHAUSTED)
+            self.store.set_auto_switched_from_primary(
+                reason in (SwitchReason.ACTIVE_EXHAUSTED, SwitchReason.THRESHOLD_ADVISORY))
         except Exception:
             pass
         name = self._nick(target_id)
         if reason == SwitchReason.PRIMARY_RECOVERED:
             notify(f"✅ {name} 계정으로 복귀", "한도가 초기화돼 주 계정으로 돌아왔어요.")
+        elif reason == SwitchReason.THRESHOLD_ADVISORY:
+            # ★ 소진이 아니라 **선제** 전환 — 문구를 구분한다.
+            notify(f"🔄 {name} 계정으로 미리 전환",
+                   f"{self._nick(from_id)} 한도가 가까워져 미리 옮겼어요. 새 claude 세션부터 적용돼요.")
         else:
             notify(f"🔄 {name} 계정으로 전환",
                    f"{self._nick(from_id)} 한도 소진 → {name}. 새 claude 세션부터 적용돼요.")
+
+    # ---------- 임계값 선제 전환 ----------
+
+    def _poll_threshold(self, now: float) -> None:
+        """활성 계정 사용률을 보고 advisory 를 set/clear 한 뒤, 유효하면 후보 탐색→판정→적용.
+
+        **5분 싱크 성사 뒤에만** 호출된다 — 활성 secret 이 방금 갱신됐으므로 저장 스냅샷으로
+        조회한다(라이브 2차 읽기 없음).
+        """
+        active = self.store.file.active
+        if active is None or active.needs_reauth:
+            return
+        snap = self.store.secret(active.id)
+        if snap is None:
+            return
+        try:
+            usage_snap = usage.fetch(snap.credentials_blob, now, self.usage_transport)
+        except Exception:
+            return
+        if usage_snap is None:
+            return
+
+        threshold = self.store.file.advisory_threshold
+        util = usage_snap.five_hour_percent or 0.0
+
+        # 히스테리시스 set/clear. set: 임계값 이상 + 리셋 시각 존재 → detected_at 보존해 세운다.
+        # clear: 밴드 아래(임계값-5 이하) + 기존 advisory 존재 → 해제하되 백오프·last-advised
+        #        맵은 **건드리지 않는다**(새 창은 resets_at 이 달라 자연히 재알림된다).
+        # 그 사이(밴드 내부)면 그대로 둔다.
+        if (AdvisoryRecord.should_set(util, threshold)
+                and usage_snap.five_hour_resets_at is not None):
+            detected_at = active.advisory.detected_at if active.advisory else now
+            self.store.set_advisory(active.id, AdvisoryRecord(
+                utilization=util, resets_at=usage_snap.five_hour_resets_at,
+                detected_at=detected_at))
+        elif AdvisoryRecord.should_clear(util, threshold) and active.advisory is not None:
+            self.store.set_advisory(active.id, None)
+
+        advised = self.store.file.active
+        if advised is None or advised.id != active.id or advised.advisory is None:
+            return
+        advisory = advised.advisory
+
+        # 후보 탐색은 "전환 가능"할 때만 — 자동 전환이 켜져 있고 백오프 창을 지났을 때.
+        # 꺼져 있으면 후보는 알림 경로에서 쓰이지 않으므로 탐색(네트워크)도 생략한다.
+        verified_candidate = None
+        if (self.store.file.auto_switch_enabled
+                and self.engine.should_probe_candidates(self._last_no_candidate_at, now)):
+            verified_candidate = self._probe_candidate(threshold, now)
+            # 후보 있으면 백오프 리셋, 없으면 지금부터 백오프 시작.
+            # ★ 여기서만 리셋한다 — advisory clear 에서는 절대 리셋하지 않는다(오실레이션 방어).
+            self._last_no_candidate_at = None if verified_candidate else now
+
+        # ★★★ 로드-베어링 순서 — 절대 재배열 금지.
+        # "맵을 먼저 쓰고 플래그를 계산"하면 비교가 항상 같아져 already_advised 가 영원히
+        # True 가 되고, 토글-off 알림(NOTIFY_ADVISORY_ONLY)이 영구히 삼켜진다(엔진 테스트는
+        # 플래그를 파라미터로 주입받아 초록으로 남는다 — 포착-비교-호출-쓰기 순서로만 잡힌다).
+        #   1) 직전 last-advised resets_at 을 **맵 쓰기 전에** 지역 변수로 포착
+        prior_advised = self._last_advised_resets_at.get(active.id)
+        #   2) 포착한 지역 값과 이번 advisory 를 비교
+        already_advised = prior_advised == advisory.resets_at
+        #   3) 엔진 판정 → 적용
+        self._apply(self.engine.check_advisory(
+            self.store.file, active.id, verified_candidate, already_advised, now), now)
+        #   4) **그런 다음에야** 이번 폴의 resets_at 을 맵에 쓴다(토글 상태 무관)
+        self._last_advised_resets_at[active.id] = advisory.resets_at
+
+    def _probe_candidate(self, threshold: float, now: float) -> Optional[str]:
+        """advisory 가 걸린 활성 계정의 폴백 후보를 우선순위대로 검증. 임계값 미만인 첫 후보.
+
+        ★ 네트워크 refresh 는 `ESCALATE`(만료 + 쿨다운 경과)에서만 — 멀쩡한 폴백의 토큰을
+          회전시켜 벽돌로 만들지 않기 위한 가드다. 이 메서드는 checker 가 스스로 하는 것
+          이상으로 needs_reauth 를 마킹하지 않는다(알림도 없음).
+        """
+        active = self.store.file.active_account_id
+        for p in self.store.file.accounts:
+            if p.id == active or p.is_limited(now) or p.needs_reauth:
+                continue
+            snap = self.store.secret(p.id)
+            if snap is None:
+                continue
+            blob = snap.credentials_blob
+            action = AutoSwitchEngine.candidate_probe_action(
+                credentials.expires_at(blob), now,
+                self._last_usage_refresh_attempt.get(p.id), PROBE_REFRESH_COOLDOWN)
+            if action == CandidateProbeAction.SKIP_COOLDOWN:
+                continue   # 만료 + 쿨다운 중 — 죽었다고 단정하지 않고 넘어간다
+            if action == CandidateProbeAction.ESCALATE:
+                self._last_usage_refresh_attempt[p.id] = now
+                r = self.fallback_checker.check(p.id, active, now, allow_network=True)
+                if r != FallbackCheckResult.REFRESHED_ALIVE:
+                    continue   # checker 가 이미 마킹 — 추가 알림 없이 스킵
+                self._last_usage_refresh_attempt.pop(p.id, None)
+                fresh = self.store.secret(p.id)
+                if fresh is None:
+                    continue
+                blob = fresh.credentials_blob   # 회전된 신선한 토큰으로 조회
+            try:
+                s = usage.fetch(blob, now, self.usage_transport)
+            except Exception:
+                continue
+            if s is None:
+                continue
+            if (s.five_hour_percent or 0.0) < threshold:
+                return p.id     # 임계값 미만 = 검증된 후보
+        return None
 
     def _verify_hit(self, account_id: str, hit: RateLimitHit,
                     now: float) -> Optional[RateLimitInfo]:

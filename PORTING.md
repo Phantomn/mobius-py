@@ -178,12 +178,17 @@ needsReauth를 자동으로 푼다."
 upstream에 있으나 아직 옮기지 않은 것. 버그가 아니라 범위 밖이다.
 
 - **Codex 지원 전반** (`Codex*.swift`) — 이 포크는 Claude 경로만 다룬다.
-- **임계값 선제 전환** (`usageAdvisory` / `pinnedAt`, `b8627bb`) — 한도 100% 전에
-  미리 전환. `AccountProfile`에 필드 2개와 엔진 분기가 필요하다.
+- ~~**임계값 선제 전환**~~ — **포팅 완료** (2026-08-15). `AdvisoryRecord` + `pinned_at`,
+  엔진 `check_advisory`, 데몬 `_poll_threshold`/`_probe_candidate`, CLI `mobius advisory`.
+  UI 이벤트가 없으므로 5분 라이브싱크 성사 뒤에 폴을 얹었다(`refresh_active_snapshot_if_stable`
+  이 bool 을 돌려주는 신선도 계약). 기본 꺼짐 — 켜야 네트워크를 쓴다.
+  upstream 이 리뷰에서 잡은 결함 두 개를 그대로 가져왔다: **핀 시각 비교**(옛 핀이 새 경고를
+  영구 거부하지 않도록)와 **복귀 게이트 max**(advisory 만으로 떠난 경우 2분 주기 핑퐁 방지).
 - **`AuthSuspicion`** (`b8627bb`) — 세션 활동 × 토큰 만료 상관으로 "세션은 도는데
   로그인이 죽었다"를 감지하는 **표시 전용** 배지. 데몬엔 표시할 UI가 없어 후순위.
-- **`UsagePollBreaker`** (`b8627bb`) — usage 조회 3연속 실패 시 배경 폴 중단.
-  이 포크의 usage 호출은 딱지 붙은 계정 한정 + 30분 게이트라 현재는 폭주 여지가 작다.
+- **`UsagePollBreaker`** (`b8627bb`) — usage 조회 3연속 실패 시 배경 폴 중단. upstream 은
+  팝오버를 열 때마다 폴이 추가로 돌아 필요했지만, 이 포크는 UI 이벤트가 없어 폴 주기가
+  5분으로 고정이다(실패 1회 = 타임아웃 1회). 폭주 여지가 없어 넣지 않았다.
 
 ---
 
