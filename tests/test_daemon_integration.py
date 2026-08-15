@@ -24,6 +24,9 @@ def _rate_limit_line():
 
 _USAGE_OK = json.dumps({"five_hour": {"utilization": 12.0,
                                       "resets_at": "2023-11-14T18:00:00Z"}}).encode()
+# 실제 소진 — 로그 hit 를 확인해 주는 응답.
+_USAGE_EXHAUSTED = json.dumps({"five_hour": {"utilization": 100.0,
+                                             "resets_at": "2023-11-14T18:00:00Z"}}).encode()
 
 
 def test_daemon_clears_needs_reauth_when_usage_succeeds(env):
@@ -73,6 +76,78 @@ def test_daemon_skips_usage_for_healthy_accounts(env):
     assert calls == []
 
 
+def test_daemon_rejects_hit_when_usage_says_not_exhausted(env):
+    """전환 뒤 도착한 **옛 계정의** 한도 에러가 새 활성 계정에 기록되면 안 된다.
+
+    실측 2026-08-15: 동시 실행 세션 4개가 옛 자격증명을 메모리에 들고 있어, 전환 뒤에도
+    2분 반 동안 옛 계정의 rate-limit 에러를 뱉었다. 로그 라인엔 계정이 안 적혀 있어
+    활성 계정에 오귀인됐고, 7일 16% 쓴 멀쩡한 폴백에 100% 계정의 리셋 시각이 덮여
+    자동 전환이 통째로 죽었다. hit 의 자체 타임스탬프는 전환 **뒤**라 못 거른다.
+    """
+    write_live(env, tag="A", email="a@example.com")
+    daemon = Daemon(env)
+    daemon.usage_transport = lambda token: (200, _USAGE_OK)  # 실제로는 12% — 소진 아님
+    a = daemon.store.upsert_profile("a", daemon.io.read_live_snapshot())
+    daemon.store.set_active(a.id)
+
+    proj = env.projects_dir / "p"
+    proj.mkdir(parents=True)
+    log = proj / "s.jsonl"
+    log.write_text("")
+    daemon.tick(NOW)                      # prime
+
+    log.write_text(_rate_limit_line())    # 옛 계정 것인 지연 hit 도착
+    daemon.tick(NOW)
+
+    daemon.store.reload()
+    assert daemon.store.file.accounts[0].rate_limit is None
+
+
+def test_daemon_uses_usage_reset_time_not_log(env):
+    """리셋 시각은 로그 파싱값이 아니라 usage API 가 준 실제 값을 쓴다."""
+    write_live(env, tag="A", email="a@example.com")
+    daemon = Daemon(env)
+    daemon.usage_transport = lambda token: (200, _USAGE_EXHAUSTED)
+    a = daemon.store.upsert_profile("a", daemon.io.read_live_snapshot())
+    daemon.store.set_active(a.id)
+
+    proj = env.projects_dir / "p"
+    proj.mkdir(parents=True)
+    log = proj / "s.jsonl"
+    log.write_text("")
+    daemon.tick(NOW)
+    log.write_text(_rate_limit_line())
+    daemon.tick(NOW)
+
+    daemon.store.reload()
+    rl = daemon.store.file.accounts[0].rate_limit
+    assert rl is not None
+    # _USAGE_EXHAUSTED 의 resets_at = 2023-11-14T18:00:00Z. 로그의 "8am (Asia/Seoul)" 이 아니다.
+    assert rl.resets_at == 1699984800.0
+
+
+def test_daemon_skips_usage_when_already_limited(env):
+    """이미 기록이 있으면 후속 hit 에 usage 를 다시 조회하지 않는다(버스트 비용 0)."""
+    write_live(env, tag="A", email="a@example.com")
+    daemon = Daemon(env)
+    calls = []
+    daemon.usage_transport = lambda t: calls.append(t) or (200, _USAGE_EXHAUSTED)
+    a = daemon.store.upsert_profile("a", daemon.io.read_live_snapshot())
+    daemon.store.set_active(a.id)
+    daemon.store.update(a.id, lambda p: setattr(
+        p, "rate_limit", RateLimitInfo(resets_at=NOW + 3600, recorded_at=NOW)))
+
+    proj = env.projects_dir / "p"
+    proj.mkdir(parents=True)
+    log = proj / "s.jsonl"
+    log.write_text("")
+    daemon.tick(NOW)
+    log.write_text(_rate_limit_line())
+    daemon.tick(NOW)
+
+    assert calls == []
+
+
 def test_daemon_clears_expired_rate_limit(env):
     """리셋 지난 rateLimit 레코드는 지워진다 — 남으면 지난 한도를 계속 참조한다."""
     write_live(env, tag="A", email="a@example.com")
@@ -108,6 +183,8 @@ def test_daemon_auto_switches_on_rate_limit(env):
     write_live(env, tag="A", email="a@example.com")
     daemon = Daemon(env)
     daemon.fallback_checker.refresher = FakeRefresher()  # 네트워크 차단
+    # 로그 hit 는 트리거일 뿐 — usage 가 실제 소진을 확인해야 기록·전환된다.
+    daemon.usage_transport = lambda token: (200, _USAGE_EXHAUSTED)
     a = daemon.store.upsert_profile("a", daemon.io.read_live_snapshot())
     b_snap = CredentialsSnapshot(credentials_blob=creds_blob("B"),
                                  oauth_account={"emailAddress": "b@example.com"})

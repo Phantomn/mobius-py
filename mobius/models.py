@@ -176,6 +176,31 @@ class UsageSnapshot:
     fetched_at: float
     scoped_limits: list[ScopedUsageLimit] = field(default_factory=list)
 
+    def exhaustion(self) -> Optional[tuple[Optional[float], bool]]:
+        """실제로 소진된 한도가 있으면 (리셋 시각, model_scoped) — 없으면 None.
+
+        세션 로그의 rate-limit 라인은 **어느 계정 것인지 적혀 있지 않아** 활성 계정에
+        오귀인된다(실행 중 claude 세션이 옛 자격증명을 들고 있어 전환 뒤에도 옛 계정의
+        에러를 뱉는다). 이 스냅샷은 **계정별 토큰으로 조회**한 것이라 오귀인이 불가능하므로,
+        로그 hit의 진위와 진짜 리셋 시각을 여기서 판정한다.
+
+        계정 단위 창(5시간·7일)을 모델 전용 한도보다 우선한다 — 계정이 통째로 막힌 것과
+        특정 모델만 막힌 것은 자동 전환 판단이 다르기 때문(model_scoped + 사용자 핀이면
+        머문다). 여러 창이 동시에 소진이면 **가장 이른 리셋**을 쓴다.
+        """
+        account_resets = [r for pct, r in ((self.five_hour_percent, self.five_hour_resets_at),
+                                           (self.seven_day_percent, self.seven_day_resets_at))
+                          if pct is not None and pct >= 100]
+        if account_resets:
+            known = [r for r in account_resets if r is not None]
+            return (min(known) if known else None, False)
+
+        scoped = [sl.resets_at for sl in self.scoped_limits if sl.percent >= 100]
+        if scoped:
+            known = [r for r in scoped if r is not None]
+            return (min(known) if known else None, True)
+        return None
+
 
 def new_account_id() -> str:
     return str(uuid.uuid4())

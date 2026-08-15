@@ -18,6 +18,7 @@ from .env import MobiusEnvironment
 from .fallback_check import FallbackAuthChecker, FallbackCheckResult
 from .log_watcher import SessionLogWatcher
 from .models import RateLimitInfo
+from .ratelimit_parser import RateLimitHit
 from .notify import notify
 from .store import AccountStore
 from .switcher import Switcher
@@ -32,6 +33,10 @@ PROACTIVE_PER_ACCOUNT_GATE = 6 * 3600.0
 # upstream(AppState.refreshUsageIfStale)은 팝오버 열 때마다 돌지만, 데몬엔 UI 이벤트가 없으므로
 # 시간 게이트로 대신한다. 딱지 붙은 계정만 대상이라 평시 네트워크는 0이다.
 REAUTH_RECHECK_INTERVAL = 30 * 60.0
+# 로그 hit 를 usage 로 확인하는 최소 간격(계정당). 소진이 아니라고 판정된 뒤 쏟아지는
+# 지연 hit 에 매번 조회하지 않기 위한 것 — 소진으로 판정되면 기록이 남아 이 게이트 이전에
+# 걸린다(is_limited). 짧게 잡는다: 진짜 소진은 즉시 잡아야 자동 전환이 늦지 않는다.
+USAGE_VERIFY_COOLDOWN = 60.0
 
 _DEAD_RESULTS = {
     FallbackCheckResult.DEAD, FallbackCheckResult.LOCALLY_DEAD,
@@ -53,6 +58,7 @@ class Daemon:
         self._last_proactive_sweep = float("-inf")
         self._last_proactive_refresh: dict[str, float] = {}
         self._last_reauth_recheck: dict[str, float] = {}
+        self._last_usage_verify: dict[str, float] = {}
         # usage 조회 transport — 테스트가 네트워크 없이 주입한다(None = 실제 HTTP).
         self.usage_transport = None
         self._stop = False
@@ -102,17 +108,22 @@ class Daemon:
             self._last_proactive_sweep = now
             self._proactive_refresh_expiring_fallbacks(now)
 
-        # 배치 내 모든 hit는 스캔 시점의 활성 계정에 귀속.
+        # 세션 로그의 hit 는 **증거가 아니라 트리거**다 — 라인에 계정이 적혀 있지 않으므로
+        # 활성 계정에 귀속시키면 오귀인이 난다(_verify_hit 참조). 판정은 usage API 가 한다.
         active_id = self.store.file.active_account_id
         for hit in self.watcher.scan(now):
-            if active_id is not None:
-                try:
-                    self.store.update(active_id, lambda p, h=hit: setattr(
-                        p, "rate_limit", RateLimitInfo(resets_at=h.effective_resets_at(now),
-                                                       recorded_at=now, model_scoped=h.model_scoped)))
-                except Exception:
-                    pass
-            self._apply(self.engine.on_rate_limit_hit(self.store.file, hit, now), now)
+            if active_id is None:
+                continue
+            verified = self._verify_hit(active_id, hit, now)
+            if verified is None:
+                continue
+            try:
+                self.store.update(active_id, lambda p, v=verified: setattr(p, "rate_limit", v))
+            except Exception:
+                pass
+            self._apply(self.engine.on_rate_limit_hit(
+                self.store.file, RateLimitHit(resets_at=verified.resets_at,
+                                              model_scoped=verified.model_scoped), now), now)
         self._apply(self.engine.on_tick(self.store.file, now), now)
 
     # ---------- 결정 실행 ----------
@@ -151,6 +162,56 @@ class Daemon:
         else:
             notify(f"🔄 {name} 계정으로 전환",
                    f"{self._nick(from_id)} 한도 소진 → {name}. 새 claude 세션부터 적용돼요.")
+
+    def _verify_hit(self, account_id: str, hit: RateLimitHit,
+                    now: float) -> Optional[RateLimitInfo]:
+        """로그 hit 가 **정말 이 계정 것인지** usage API 로 확인한다. 아니면 None.
+
+        ★ 왜 필요한가 (실측 2026-08-15): 세션 로그의 rate-limit 라인에는 계정이 적혀 있지
+          않다. 실행 중 claude 세션은 자격증명을 메모리에 들고 있어 전환 뒤에도 **옛 계정의**
+          한도 에러를 계속 뱉는다(동시 세션 4개, 2분 반에 걸쳐 6줄). 그 사이 전환이 일어나면
+          한 계정의 소진이 다른 계정에 기록되고, 멀쩡한 폴백이 `is_limited` 로 후보에서
+          빠져 **자동 전환이 통째로 죽는다**(실측: 7일 16% 쓴 계정에 100% 계정의 리셋 시각이
+          덮였다). hit 의 자체 타임스탬프로는 못 거른다 — 전환 뒤에 찍히기 때문이다.
+          usage 는 **계정별 토큰으로 조회**하므로 오귀인이 구조적으로 불가능하다.
+          (upstream 이 needsReauth 에 대해 같은 결론을 내린 것과 같은 원칙 — AppState.swift:863.)
+
+        ★ 부수 효과: 리셋 시각도 정확해진다. 로그의 "resets 9pm" 파싱 대신 API 가 주는
+          실제 값을 쓴다(실측 차이: 21:00 vs 20:59).
+
+        네트워크 비용은 게이트 두 개로 막는다 — 이미 기록이 있으면 0(버스트 전체가 공짜),
+        최근 확인했으면 0. 평시(hit 없음)에는 호출 자체가 없다.
+        """
+        profile = next((a for a in self.store.file.accounts if a.id == account_id), None)
+        if profile is None:
+            return None
+        if profile.is_limited(now):
+            return None  # 이미 기록됨 — 같은 소진의 후속 hit 는 확인 불필요
+        if self._last_usage_verify.get(account_id, float("-inf")) >= now - USAGE_VERIFY_COOLDOWN:
+            return None  # 방금 확인했고 소진이 아니었다 — 지연 hit 폭탄에 매번 조회하지 않는다
+        self._last_usage_verify[account_id] = now
+
+        # 활성 계정은 라이브 토큰으로 — claude 가 갱신하므로 저장 스냅샷은 낡아 401 오탐이 난다.
+        snap = (self.io.read_live_snapshot() if account_id == self.store.file.active_account_id
+                else self.store.secret(account_id))
+        if snap is None:
+            return None
+        try:
+            usage_snap = usage.fetch(snap.credentials_blob, now, self.usage_transport)
+        except Exception:
+            # 확인 불가(네트워크/401) — 귀속을 날조하지 않는다. hit 는 반복되므로 다음 틱에
+            # 다시 시도되고, 그 사이 잘못된 기록으로 폴백을 막는 일은 없다.
+            self._last_usage_verify.pop(account_id, None)
+            return None
+        if usage_snap is None:
+            return None
+        found = usage_snap.exhaustion()
+        if found is None:
+            return None  # 이 계정은 소진이 아니다 = 그 hit 는 다른 계정 것이다
+        resets_at, model_scoped = found
+        if resets_at is None:  # API 가 시각을 안 줬을 때만 로그/24h 폴백에 기댄다
+            resets_at = hit.effective_resets_at(now)
+        return RateLimitInfo(resets_at=resets_at, recorded_at=now, model_scoped=model_scoped)
 
     def _recheck_flagged_accounts(self, now: float) -> None:
         """needsReauth 딱지가 붙은 계정을 usage 조회로 재검사해, 살아있으면 딱지를 푼다.

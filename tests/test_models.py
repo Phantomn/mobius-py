@@ -1,4 +1,40 @@
-from mobius.models import AccountProfile, AccountsFile, RateLimitInfo
+from mobius.models import (AccountProfile, AccountsFile, RateLimitInfo,
+                           ScopedUsageLimit, UsageSnapshot)
+
+
+def _usage(five=None, five_r=None, week=None, week_r=None, scoped=()):
+    return UsageSnapshot(five_hour_percent=five, five_hour_resets_at=five_r,
+                         seven_day_percent=week, seven_day_resets_at=week_r,
+                         fetched_at=0.0, scoped_limits=list(scoped))
+
+
+def test_usage_exhaustion_none_when_under_limit():
+    assert _usage(five=9.0, week=16.0).exhaustion() is None
+    assert _usage().exhaustion() is None
+
+
+def test_usage_exhaustion_account_window_wins_over_scoped():
+    """계정 창 소진은 model_scoped=False — 모델 전용과 자동 전환 판단이 다르다."""
+    s = _usage(week=100.0, week_r=300.0,
+               scoped=[ScopedUsageLimit(label="Fable", percent=100.0, resets_at=100.0)])
+    assert s.exhaustion() == (300.0, False)
+
+
+def test_usage_exhaustion_earliest_reset():
+    """여러 창이 동시 소진이면 가장 이른 리셋을 쓴다."""
+    s = _usage(five=100.0, five_r=500.0, week=100.0, week_r=200.0)
+    assert s.exhaustion() == (200.0, False)
+
+
+def test_usage_exhaustion_scoped_only():
+    s = _usage(five=3.0, scoped=[ScopedUsageLimit(label="Fable", percent=100.0,
+                                                  resets_at=77.0)])
+    assert s.exhaustion() == (77.0, True)
+
+
+def test_usage_exhaustion_without_reset_time():
+    """소진은 맞는데 API 가 시각을 안 주면 None — 호출측이 로그/24h 폴백을 쓴다."""
+    assert _usage(week=100.0).exhaustion() == (None, False)
 
 
 def test_lenient_decode_missing_keys():
