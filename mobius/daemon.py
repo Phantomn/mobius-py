@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import signal
 import time
+from enum import Enum
 from typing import Optional
 
 from . import credentials, usage
@@ -18,8 +19,8 @@ from .claude_config import ClaudeConfigIO
 from .env import MobiusEnvironment
 from .fallback_check import FallbackAuthChecker, FallbackCheckResult
 from .log_watcher import SessionLogWatcher
-from .models import AdvisoryRecord, RateLimitInfo
-from .ratelimit_parser import RateLimitHit
+from .models import AdvisoryRecord, RateLimitInfo, UsageSnapshot
+from .ratelimit_parser import HitKind, RateLimitHit
 from .notify import notify
 from .store import AccountStore
 from .switcher import Switcher
@@ -34,13 +35,60 @@ PROACTIVE_PER_ACCOUNT_GATE = 6 * 3600.0
 # upstream(AppState.refreshUsageIfStale)은 팝오버 열 때마다 돌지만, 데몬엔 UI 이벤트가 없으므로
 # 시간 게이트로 대신한다. 딱지 붙은 계정만 대상이라 평시 네트워크는 0이다.
 REAUTH_RECHECK_INTERVAL = 30 * 60.0
-# 로그 hit 를 usage 로 확인하는 최소 간격(계정당). 소진이 아니라고 판정된 뒤 쏟아지는
-# 지연 hit 에 매번 조회하지 않기 위한 것 — 소진으로 판정되면 기록이 남아 이 게이트 이전에
-# 걸린다(is_limited). 짧게 잡는다: 진짜 소진은 즉시 잡아야 자동 전환이 늦지 않는다.
-USAGE_VERIFY_COOLDOWN = 60.0
+# 로그 hit 검증용 usage 조회의 최소 간격(계정당). 한 번도 본 적 없는 큰 세션 파일이
+# 과거 hit 를 무더기로 쏟아낼 때 조회가 hit 수만큼 늘어나는 것을 막는다.
+# ★ 이 창 안에 도착한 hit 는 **버리지 않는다** — 판정 보류(UNKNOWN)로 두고 다시 시도한다.
+#   짧게 잡는 이유: 이 값이 곧 진짜 소진을 확인하기까지의 최대 지연이다.
+USAGE_VERIFY_MIN_INTERVAL = 15.0
+# 판정 못 한 트리거를 보관하는 한도. 지나면 조용히 버린다 — 그 이상 붙들어 봐야
+# "확인 못 했는데 기록" = 오귀인 날조라, #19 를 우리 손으로 재현하는 셈이다.
+PENDING_HIT_TTL = 15 * 60.0
 # 후보 탐색에서 만료된 폴백 토큰을 refresh 로 승격할 때의 계정당 재시도 쿨다운.
 # transient 실패가 5분마다 회전 시도로 반복되지 않게 한다.
 PROBE_REFRESH_COOLDOWN = 30 * 60.0
+
+class Verdict(Enum):
+    """로그 hit 판정 — **3-값이다.**
+
+    ★ 왜 Optional 이 아닌가 (근본 원인, 실패기록): 검증을 도입하면서 판정을
+      `Optional[RateLimitInfo]`(있음/없음) 이진으로 접었더니, 실제 도메인의 네 결과
+      ①확인됨 ②확인 결과 아님 ③아직 모름 ④이 증거로는 판정 불가 중 ③④가 전부 ②로
+      흡수됐다. 증거 스트림이 **일회성**이라(워처 오프셋은 전진하고, 사용자는 한도
+      에러를 보면 타이핑을 멈춘다) ②는 파괴적이다 — 조회가 한 번 실패한 것만으로
+      진짜 소진이 영영 기록되지 않는다(수정 전보다 나쁨: 예전엔 무조건 기록했다).
+    """
+
+    CONFIRMED = "confirmed"   # 이 계정이 실제로 소진 — 기록한다
+    REFUTED = "refuted"       # 이 계정은 여유 — 그 hit 는 다른 계정 것이다. 버린다.
+    UNKNOWN = "unknown"       # 판정 못 함 — 트리거를 보관해 다시 시도한다
+
+
+def verify_verdict(snap: UsageSnapshot, hit: RateLimitHit,
+                   now: float) -> tuple[Verdict, Optional[float]]:
+    """usage 스냅샷으로 hit 를 판정한다 — 순수 함수(네트워크·IO 없음).
+
+    돌려주는 리셋 시각은 CONFIRMED 일 때만 의미가 있고, None 이면 호출자가
+    hit 의 폴백(24시간)을 쓴다.
+    """
+    if hit.kind == HitKind.MONTHLY_SPEND:
+        # 지출 한도가 애초에 없는 계정이면 이 hit 는 이 계정 것일 수 없다 — 확정 반증.
+        if snap.spend_enabled is False:
+            return (Verdict.REFUTED, None)
+        if snap.spend_percent is not None and snap.spend_percent >= 100:
+            return (Verdict.CONFIRMED, None)   # 지출 한도엔 리셋 시각이 없다 → 24h 폴백
+        # ponytail: 소진 상태의 spend 블록을 **실측한 적이 없다**(이 환경은 enabled=false).
+        # percent<100 을 반증으로 쓰면 스키마 추측이 틀렸을 때 진짜 소진을 조용히 버린다 —
+        # 보류로 두면 최악이 조회 몇 번과 15분 뒤 로그 한 줄이다. 관측되면 규칙을 좁힌다.
+        return (Verdict.UNKNOWN, None)
+
+    if not snap.exhausted_account_window():
+        return (Verdict.REFUTED, None)
+    reset = snap.account_reset_after(now)
+    if reset is None:
+        # 소진인데 아직 안 지난 리셋 시각이 없다 = 응답이 낡았다. "여유"와 구분해 보류한다.
+        return (Verdict.UNKNOWN, None)
+    return (Verdict.CONFIRMED, reset)
+
 
 _DEAD_RESULTS = {
     FallbackCheckResult.DEAD, FallbackCheckResult.LOCALLY_DEAD,
@@ -66,6 +114,9 @@ class Daemon:
         self._last_usage_refresh_attempt: dict[str, float] = {}
         self._last_advised_resets_at: dict[str, float] = {}
         self._last_no_candidate_at: Optional[float] = None
+        # 판정 못 한 트리거 (account_id, hit, 최초 도착 시각). 슬롯 하나면 충분하다 —
+        # 같은 계정의 여러 hit 는 구분 불가능한 같은 증거("뭔가 한도라고 했다")다.
+        self._pending_hit: Optional[tuple[str, RateLimitHit, float]] = None
         # usage 조회 transport — 테스트가 네트워크 없이 주입한다(None = 실제 HTTP).
         self.usage_transport = None
         self._stop = False
@@ -125,19 +176,23 @@ class Daemon:
         # 세션 로그의 hit 는 **증거가 아니라 트리거**다 — 라인에 계정이 적혀 있지 않으므로
         # 활성 계정에 귀속시키면 오귀인이 난다(_verify_hit 참조). 판정은 usage API 가 한다.
         active_id = self.store.file.active_account_id
+        # ★ 스캔 **앞**에서 재시도한다 — 여기서 소진이 확정되면 기록이 남아, 같은 틱의
+        #   새 hit 들은 is_limited 게이트에 걸려 조회 없이 끝난다.
+        self._retry_pending_hit(active_id, now)
         for hit in self.watcher.scan(now):
             if active_id is None:
                 continue
-            verified = self._verify_hit(active_id, hit, now)
-            if verified is None:
+            verdict, info = self._verify_hit(active_id, hit, now)
+            if verdict == Verdict.UNKNOWN:
+                # 트리거를 보관한다. 버리면 안 되는 이유는 Verdict 주석 참조.
+                if self._pending_hit is None or self._pending_hit[0] != active_id:
+                    self._pending_hit = (active_id, hit, now)
                 continue
-            try:
-                self.store.update(active_id, lambda p, v=verified: setattr(p, "rate_limit", v))
-            except Exception:
-                pass
-            self._apply(self.engine.on_rate_limit_hit(
-                self.store.file, RateLimitHit(resets_at=verified.resets_at,
-                                              model_scoped=verified.model_scoped), now), now)
+            # CONFIRMED/REFUTED 는 방금 뜬 스냅샷(또는 이미 있는 기록)에서 나온 판정이라
+            # 보관 중인 옛 트리거보다 새롭다 — 보류를 정리한다.
+            self._pending_hit = None
+            if verdict == Verdict.CONFIRMED and info is not None:
+                self._record_and_apply(active_id, info, hit, now)
         self._apply(self.engine.on_tick(self.store.file, now), now)
 
     # ---------- 결정 실행 ----------
@@ -294,9 +349,49 @@ class Daemon:
                 return p.id     # 임계값 미만 = 검증된 후보
         return None
 
+    def _record_and_apply(self, account_id: str, info: RateLimitInfo,
+                          hit: RateLimitHit, now: float) -> None:
+        """확정된 소진을 기록하고 엔진 결정을 실행한다(인라인 경로와 보류 재시도 경로 공용)."""
+        try:
+            self.store.update(account_id, lambda p, v=info: setattr(p, "rate_limit", v))
+        except Exception:
+            pass
+        self._apply(self.engine.on_rate_limit_hit(
+            self.store.file, RateLimitHit(resets_at=info.resets_at, kind=hit.kind,
+                                          model_scoped=info.model_scoped), now), now)
+
+    def _retry_pending_hit(self, active_id: Optional[str], now: float) -> None:
+        """판정 못 하고 보관해 둔 트리거를 다시 판정한다.
+
+        ★ 왜 보관하는가: 로그 hit 는 워처 오프셋이 전진해 **한 번만 배달**되고, 사용자는
+          한도 에러를 보면 타이핑을 멈춰 새 hit 이 오지 않는다. 예전 주석("hit 는 반복되므로
+          다음 틱에 다시 시도된다")은 **사실이 아니었다** — 조회 한 번 실패가 곧 영구 유실이다.
+
+        ★ 활성 계정이 바뀌면 버린다: 판정은 그 계정의 토큰으로 조회해야 하는데 비활성
+          계정은 저장 토큰이 만료돼 refresh(토큰 회전)를 부르게 된다. 멀쩡한 폴백의 토큰을
+          한도 판정 때문에 회전시키지 않는다는 원칙이 우선이다.
+        """
+        if self._pending_hit is None:
+            return
+        account_id, hit, first_seen = self._pending_hit
+        if active_id != account_id:
+            self._pending_hit = None
+            return
+        if now - first_seen >= PENDING_HIT_TTL:
+            self._pending_hit = None
+            print(f"[mobius] 한도 hit 판정 보류 만료 — {PENDING_HIT_TTL / 60:.0f}분간 usage 확인 "
+                  f"실패로 폐기(귀속을 날조하지 않는다)", flush=True)
+            return
+        verdict, info = self._verify_hit(account_id, hit, now)
+        if verdict == Verdict.UNKNOWN:
+            return          # 계속 보관
+        self._pending_hit = None
+        if verdict == Verdict.CONFIRMED and info is not None:
+            self._record_and_apply(account_id, info, hit, now)
+
     def _verify_hit(self, account_id: str, hit: RateLimitHit,
-                    now: float) -> Optional[RateLimitInfo]:
-        """로그 hit 가 **정말 이 계정 것인지** usage API 로 확인한다. 아니면 None.
+                    now: float) -> tuple[Verdict, Optional[RateLimitInfo]]:
+        """로그 hit 가 **정말 이 계정 것인지** usage API 로 확인한다.
 
         ★ 왜 필요한가 (실측 2026-08-15): 세션 로그의 rate-limit 라인에는 계정이 적혀 있지
           않다. 실행 중 claude 세션은 자격증명을 메모리에 들고 있어 전환 뒤에도 **옛 계정의**
@@ -310,39 +405,43 @@ class Daemon:
         ★ 부수 효과: 리셋 시각도 정확해진다. 로그의 "resets 9pm" 파싱 대신 API 가 주는
           실제 값을 쓴다(실측 차이: 21:00 vs 20:59).
 
-        네트워크 비용은 게이트 두 개로 막는다 — 이미 기록이 있으면 0(버스트 전체가 공짜),
-        최근 확인했으면 0. 평시(hit 없음)에는 호출 자체가 없다.
+        ★ **신선도는 나이가 아니라 순서로 판단한다.** "최근 확인했으면 스킵"은 40초 전
+          96% 였던 스냅샷으로 방금 100% 가 된 창을 "여유"라고 오판한다. 그래서 낡은
+          스냅샷을 재사용하지 않는다 — 매 판정은 **트리거보다 나중에** 뜬 조회로만
+          내리고, 조회를 못 하면 판정하지 않는다(UNKNOWN). 순서 조건이 구조적으로 보장된다.
+
+        네트워크 비용: 이미 기록이 있으면 0(버스트 전체가 공짜), 조회 간격 하한이 있고,
+        평시(hit 없음)에는 호출 자체가 없다.
         """
         profile = next((a for a in self.store.file.accounts if a.id == account_id), None)
         if profile is None:
-            return None
+            return (Verdict.REFUTED, None)
         if profile.is_limited(now):
-            return None  # 이미 기록됨 — 같은 소진의 후속 hit 는 확인 불필요
-        if self._last_usage_verify.get(account_id, float("-inf")) >= now - USAGE_VERIFY_COOLDOWN:
-            return None  # 방금 확인했고 소진이 아니었다 — 지연 hit 폭탄에 매번 조회하지 않는다
+            return (Verdict.REFUTED, None)  # 이미 기록됨 — 같은 소진의 후속 hit 는 확인 불필요
+        if (self._last_usage_verify.get(account_id, float("-inf"))
+                >= now - USAGE_VERIFY_MIN_INTERVAL):
+            return (Verdict.UNKNOWN, None)  # 조회 간격 하한 — 버리지 않고 보류한다
         self._last_usage_verify[account_id] = now
 
         # 활성 계정은 라이브 토큰으로 — claude 가 갱신하므로 저장 스냅샷은 낡아 401 오탐이 난다.
         snap = (self.io.read_live_snapshot() if account_id == self.store.file.active_account_id
                 else self.store.secret(account_id))
         if snap is None:
-            return None
+            return (Verdict.UNKNOWN, None)
         try:
             usage_snap = usage.fetch(snap.credentials_blob, now, self.usage_transport)
         except Exception:
-            # 확인 불가(네트워크/401) — 귀속을 날조하지 않는다. hit 는 반복되므로 다음 틱에
-            # 다시 시도되고, 그 사이 잘못된 기록으로 폴백을 막는 일은 없다.
-            self._last_usage_verify.pop(account_id, None)
-            return None
+            return (Verdict.UNKNOWN, None)  # 네트워크/401 — 한도에 대해 아무 말도 안 한다
         if usage_snap is None:
-            return None
-        found = usage_snap.exhaustion()
-        if found is None:
-            return None  # 이 계정은 소진이 아니다 = 그 hit 는 다른 계정 것이다
-        resets_at, model_scoped = found
-        if resets_at is None:  # API 가 시각을 안 줬을 때만 로그/24h 폴백에 기댄다
-            resets_at = hit.effective_resets_at(now)
-        return RateLimitInfo(resets_at=resets_at, recorded_at=now, model_scoped=model_scoped)
+            return (Verdict.UNKNOWN, None)  # 200 아님/파싱 실패 — 판단 근거 없음
+
+        verdict, reset = verify_verdict(usage_snap, hit, now)
+        if verdict != Verdict.CONFIRMED:
+            return (verdict, None)
+        if reset is None:  # API 가 시각을 안 줬을 때만(지출 한도) 로그/24h 폴백에 기댄다
+            reset = hit.effective_resets_at(now)
+        return (verdict, RateLimitInfo(resets_at=reset, recorded_at=now,
+                                       model_scoped=hit.model_scoped))
 
     def _recheck_flagged_accounts(self, now: float) -> None:
         """needsReauth 딱지가 붙은 계정을 usage 조회로 재검사해, 살아있으면 딱지를 푼다.

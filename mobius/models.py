@@ -238,32 +238,43 @@ class UsageSnapshot:
     seven_day_percent: Optional[float]
     seven_day_resets_at: Optional[float]
     fetched_at: float
+    # ponytail: 파싱만 하고 판정에는 쓰지 않는다 — 아래 exhausted_account_window 주석 참조.
+    # upstream 이 유지하는 와이어 포맷이라 대응표(PORTING.md)를 위해 남긴다.
     scoped_limits: list[ScopedUsageLimit] = field(default_factory=list)
+    # 월간 지출 한도 블록(`spend`). enabled=False 면 이 계정엔 지출 한도가 없다.
+    spend_enabled: Optional[bool] = None
+    spend_percent: Optional[float] = None
 
-    def exhaustion(self) -> Optional[tuple[Optional[float], bool]]:
-        """실제로 소진된 한도가 있으면 (리셋 시각, model_scoped) — 없으면 None.
+    def exhausted_account_window(self) -> bool:
+        """**계정 자체**(5시간·7일)가 막혔는가 — 리셋 시각의 유효성과 무관.
 
         세션 로그의 rate-limit 라인은 **어느 계정 것인지 적혀 있지 않아** 활성 계정에
         오귀인된다(실행 중 claude 세션이 옛 자격증명을 들고 있어 전환 뒤에도 옛 계정의
         에러를 뱉는다). 이 스냅샷은 **계정별 토큰으로 조회**한 것이라 오귀인이 불가능하므로,
-        로그 hit의 진위와 진짜 리셋 시각을 여기서 판정한다.
+        로그 hit의 진위를 여기서 판정한다.
 
-        계정 단위 창(5시간·7일)을 모델 전용 한도보다 우선한다 — 계정이 통째로 막힌 것과
-        특정 모델만 막힌 것은 자동 전환 판단이 다르기 때문(model_scoped + 사용자 핀이면
-        머문다). 여러 창이 동시에 소진이면 **가장 이른 리셋**을 쓴다.
+        ★ **모델 전용 한도(scoped_limits)를 일부러 제외한다.** 그것까지 소진으로 기록하면
+          `is_limited` 가 "계정을 못 쓴다"와 "그 모델만 못 쓴다"를 구분하지 못해, 계정은
+          멀쩡한데 Fable 주간만 100% 인 폴백이 `_first_available` 후보에서 **며칠간**
+          빠진다 — 오귀인 사고(#19)와 같은 실패를 자초하는 것이다. 모델 전용 한도로
+          전환하려면 `is_limited`/후보 선택이 그 구분을 먼저 이해해야 한다(미지원).
         """
-        account_resets = [r for pct, r in ((self.five_hour_percent, self.five_hour_resets_at),
-                                           (self.seven_day_percent, self.seven_day_resets_at))
-                          if pct is not None and pct >= 100]
-        if account_resets:
-            known = [r for r in account_resets if r is not None]
-            return (min(known) if known else None, False)
+        return (self.five_hour_percent or 0.0) >= 100 or (self.seven_day_percent or 0.0) >= 100
 
-        scoped = [sl.resets_at for sl in self.scoped_limits if sl.percent >= 100]
-        if scoped:
-            known = [r for r in scoped if r is not None]
-            return (min(known) if known else None, True)
-        return None
+    def account_reset_after(self, now: float) -> Optional[float]:
+        """소진된 계정 창 중 **아직 안 지난** 리셋 시각의 최댓값. 없으면 None.
+
+        ★ 최댓값이다(최솟값 아님). 5시간·7일이 동시에 100% 면 계정은 **늦은 쪽**이 풀릴
+          때까지 막혀 있다. 이른 쪽을 쓰면 레코드가 먼저 만료돼 엔진이 아직 막힌 계정으로
+          돌아갔다가 즉시 다시 튕긴다.
+        ★ 이미 지난 리셋은 버린다 — 창이 리셋됐는데 100% 로 읽힌 낡은 응답이라, 그대로
+          기록하면 `is_limited` 가 곧바로 False 가 돼 판정이 무의미해진다. 호출자는 이
+          None 을 "여유 있음"이 아니라 **판정 보류**로 다뤄야 한다.
+        """
+        resets = [r for pct, r in ((self.five_hour_percent, self.five_hour_resets_at),
+                                   (self.seven_day_percent, self.seven_day_resets_at))
+                  if pct is not None and pct >= 100 and r is not None and r > now]
+        return max(resets) if resets else None
 
 
 def new_account_id() -> str:

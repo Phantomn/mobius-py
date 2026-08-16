@@ -23,10 +23,14 @@ def _rate_limit_line():
 
 
 _USAGE_OK = json.dumps({"five_hour": {"utilization": 12.0,
-                                      "resets_at": "2023-11-14T18:00:00Z"}}).encode()
+                                      "resets_at": "2023-11-15T06:00:00Z"}}).encode()
 # 실제 소진 — 로그 hit 를 확인해 주는 응답.
+# ★ resets_at 은 NOW(2023-11-14T22:13:20Z)보다 **미래**여야 한다. 과거 리셋은 낡은 응답이라
+#   판정 보류로 다뤄진다(models.account_reset_after) — 예전 픽스처는 과거였고, 과거 시각을
+#   그대로 기록하던 구 동작이 테스트에 굳어 있었다.
 _USAGE_EXHAUSTED = json.dumps({"five_hour": {"utilization": 100.0,
-                                             "resets_at": "2023-11-14T18:00:00Z"}}).encode()
+                                             "resets_at": "2023-11-15T06:00:00Z"}}).encode()
+_RESET_EPOCH = 1700028000.0     # 2023-11-15T06:00:00Z
 
 
 def test_daemon_clears_needs_reauth_when_usage_succeeds(env):
@@ -122,8 +126,8 @@ def test_daemon_uses_usage_reset_time_not_log(env):
     daemon.store.reload()
     rl = daemon.store.file.accounts[0].rate_limit
     assert rl is not None
-    # _USAGE_EXHAUSTED 의 resets_at = 2023-11-14T18:00:00Z. 로그의 "8am (Asia/Seoul)" 이 아니다.
-    assert rl.resets_at == 1699984800.0
+    # _USAGE_EXHAUSTED 의 resets_at 을 쓴다 — 로그의 "8am (Asia/Seoul)" 이 아니다.
+    assert rl.resets_at == _RESET_EPOCH
 
 
 def test_daemon_skips_usage_when_already_limited(env):
@@ -146,6 +150,193 @@ def test_daemon_skips_usage_when_already_limited(env):
     daemon.tick(NOW)
 
     assert calls == []
+
+
+# ---------- 판정 보류(UNKNOWN) — 트리거를 버리지 않는다 ----------
+
+def _hit_daemon(env, transport):
+    """A(활성 라이브) 하나 + 프라이밍 끝난 로그 파일."""
+    write_live(env, tag="A", email="a@example.com")
+    d = Daemon(env)
+    d.usage_transport = transport
+    a = d.store.upsert_profile("a", d.io.read_live_snapshot())
+    d.store.set_active(a.id)
+    proj = env.projects_dir / "p"
+    proj.mkdir(parents=True)
+    log = proj / "s.jsonl"
+    log.write_text("")
+    d.tick(NOW)                 # prime
+    return d, a, log
+
+
+def _boom(_token):
+    raise OSError("network down")
+
+
+def test_daemon_retries_hit_after_usage_failure(env):
+    """★ 조회 실패로 판정 못 한 hit 를 **버리지 않는다.**
+
+    로그 hit 는 워처 오프셋이 전진해 **한 번만 배달**되고, 사용자는 한도 에러를 보면
+    타이핑을 멈춰 새 hit 이 오지 않는다. 판정 실패를 "소진 아님"과 같이 다루면 조회
+    한 번 실패가 곧 **영구 유실**이다(검증 도입 전보다 나쁨 — 예전엔 무조건 기록했다).
+    """
+    d, a, log = _hit_daemon(env, _boom)
+
+    log.write_text(_rate_limit_line())
+    d.tick(NOW + 1)                       # 조회 실패 → 기록 없음, 트리거 보관
+    d.store.reload()
+    assert d.store.file.accounts[0].rate_limit is None
+    assert d._pending_hit is not None
+
+    d.usage_transport = lambda t: (200, _USAGE_EXHAUSTED)
+    d.tick(NOW + 30)                      # 로그에 **새 줄이 없어도** 재판정된다
+
+    d.store.reload()
+    rl = d.store.file.accounts[0].rate_limit
+    assert rl is not None and rl.resets_at == _RESET_EPOCH
+    assert d._pending_hit is None
+
+
+def test_daemon_holds_hit_arriving_inside_fetch_gate(env):
+    """★ 조회 간격 하한 안에 도착한 hit 도 버리지 않는다.
+
+    "최근 확인했으니 스킵"으로 버리면, 5초 전 96% 였던 판단으로 방금 100% 가 된 창을
+    "여유"라고 오판한다. 신선도는 나이가 아니라 **순서**다 — 낡은 판단을 재사용하지 않고
+    보류했다가, 트리거보다 나중에 뜬 조회로만 판정한다.
+    """
+    d, a, log = _hit_daemon(env, lambda t: (200, _USAGE_OK))   # 12% — 소진 아님
+
+    log.write_text(_rate_limit_line())
+    d.tick(NOW + 1)                       # 1차 hit: 반증 → 버림, 보류 없음
+    assert d._pending_hit is None
+
+    log.write_text(_rate_limit_line() + _rate_limit_line())
+    d.tick(NOW + 5)                       # 간격 하한(15초) 안 — 판정 불가 → 보류
+    d.store.reload()
+    assert d.store.file.accounts[0].rate_limit is None
+    assert d._pending_hit is not None
+
+    d.usage_transport = lambda t: (200, _USAGE_EXHAUSTED)   # 그 사이 진짜로 100% 가 됐다
+    d.tick(NOW + 20)
+
+    d.store.reload()
+    assert d.store.file.accounts[0].rate_limit is not None
+
+
+def test_daemon_drops_pending_hit_after_ttl(env):
+    """TTL 이 지나면 조용히 버린다 — 확인 못 한 채 기록하면 오귀인 날조다(#19 재현)."""
+    d, a, log = _hit_daemon(env, _boom)
+
+    log.write_text(_rate_limit_line())
+    d.tick(NOW + 1)
+    assert d._pending_hit is not None
+
+    d.tick(NOW + 1 + 15 * 60)
+
+    d.store.reload()
+    assert d._pending_hit is None
+    assert d.store.file.accounts[0].rate_limit is None
+
+
+def test_daemon_drops_pending_hit_when_active_changes(env):
+    """활성이 바뀌면 보류를 버린다 — 비활성 계정 판정은 토큰 회전을 부른다."""
+    d, a, log = _hit_daemon(env, _boom)
+    b = d.store.upsert_profile("b", CredentialsSnapshot(
+        credentials_blob=creds_blob("B"), oauth_account={"emailAddress": "b@example.com"}))
+
+    log.write_text(_rate_limit_line())
+    d.tick(NOW + 1)
+    assert d._pending_hit is not None
+
+    d.switcher.switch_to(b.id)   # 라이브까지 실제로 스왑 (set_active 만 하면 reconcile 이 되돌린다)
+    d.tick(NOW + 30)
+
+    assert d._pending_hit is None
+    d.store.reload()
+    assert all(p.rate_limit is None for p in d.store.file.accounts)
+
+
+# ---------- 월간 지출 한도 — 창이 아니라 spend 블록으로 판정 ----------
+
+def _spend_line():
+    return json.dumps({"error": "rate_limit",
+                       "message": {"content": [{"text": "You've hit your monthly spend limit."}]},
+                       "timestamp": "2023-11-14T12:00:00.000Z"}) + "\n"
+
+
+def _usage_spend(enabled, percent):
+    return json.dumps({"five_hour": {"utilization": 9.0, "resets_at": "2023-11-15T06:00:00Z"},
+                       "spend": {"enabled": enabled, "percent": percent}}).encode()
+
+
+def test_daemon_records_monthly_spend_from_spend_block(env):
+    """★ 지출 한도 hit 를 창으로만 검증하면 **항상** 버려진다(창은 여유니까).
+
+    파서가 응답의 spend 블록을 통째로 버리고 있어서, P3 hit 는 검증 도입 이후 100%
+    폐기됐다 — 도입 전에는 기록되던 것이라 회귀였다.
+    """
+    d, a, log = _hit_daemon(env, lambda t: (200, _usage_spend(True, 100.0)))
+
+    log.write_text(_spend_line())
+    d.tick(NOW + 1)
+
+    d.store.reload()
+    rl = d.store.file.accounts[0].rate_limit
+    assert rl is not None
+    assert rl.resets_at == NOW + 1 + 24 * 3600     # 지출 한도엔 리셋 시각이 없다 → 24h 폴백
+    assert rl.model_scoped is False                # 계정 전체가 막힌 것 — 핀 예외 대상 아님
+
+
+def test_daemon_refutes_spend_hit_when_no_spend_limit(env):
+    """지출 한도가 없는 계정(enabled=false)이면 그 hit 는 이 계정 것일 수 없다 — 확정 반증."""
+    d, a, log = _hit_daemon(env, lambda t: (200, _usage_spend(False, 0.0)))
+
+    log.write_text(_spend_line())
+    d.tick(NOW + 1)
+
+    d.store.reload()
+    assert d.store.file.accounts[0].rate_limit is None
+    assert d._pending_hit is None
+
+
+def test_daemon_holds_spend_hit_when_under_limit(env):
+    """지출 한도는 있는데 100% 미만 — 소진 상태의 spend 블록을 실측한 적이 없어 보류한다.
+
+    반증으로 단정하면 스키마 추측이 틀렸을 때 진짜 소진을 조용히 버린다. 보류의 최악은
+    조회 몇 번과 15분 뒤 로그 한 줄이다.
+    """
+    d, a, log = _hit_daemon(env, lambda t: (200, _usage_spend(True, 40.0)))
+
+    log.write_text(_spend_line())
+    d.tick(NOW + 1)
+
+    d.store.reload()
+    assert d.store.file.accounts[0].rate_limit is None
+    assert d._pending_hit is not None
+
+
+def test_daemon_ignores_model_scoped_limit(env):
+    """★ 모델 전용 주간 한도(Fable)는 계정 소진으로 기록하지 않는다.
+
+    기록하면 `is_limited` 가 계정 소진과 구분 못 해, 계정은 멀쩡한 폴백이 **며칠간**
+    후보에서 빠진다 — 우리가 #19 로 제보한 실패를 스스로 재현하는 셈이다.
+    """
+    scoped = json.dumps({
+        "five_hour": {"utilization": 9.0, "resets_at": "2023-11-15T06:00:00Z"},
+        "limits": [{"kind": "weekly_scoped", "percent": 100.0,
+                    "resets_at": "2023-11-20T06:00:00Z",
+                    "scope": {"model": {"display_name": "Fable"}}}],
+    }).encode()
+    d, a, log = _hit_daemon(env, lambda t: (200, scoped))
+
+    log.write_text(_rate_limit_line())
+    d.tick(NOW + 1)
+
+    d.store.reload()
+    assert d.store.file.accounts[0].rate_limit is None
+    # ★ 보류가 아니라 **반증**이어야 한다. 이 줄이 없으면 "계정 소진에 포함"으로 되돌려도
+    #   (창 리셋 시각이 없어 보류가 되는 바람에) 테스트가 초록으로 남는다 — 실제로 밟았다.
+    assert d._pending_hit is None
 
 
 # ---------- 임계값 선제 전환 ----------

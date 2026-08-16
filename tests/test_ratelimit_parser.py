@@ -25,10 +25,23 @@ def test_non_candidate_returns_none():
     assert rp.parse(line("hit your usage limit resets 8am (Asia/Seoul)", error=None), NOW) is None
 
 
-def test_p3_monthly_spend_model_scoped():
+def test_p3_monthly_spend_is_its_own_kind_not_model_scoped():
+    """★ 월간 지출 한도는 **모델 전용 한도가 아니다.**
+
+    구 포팅은 model_scoped=True 로 표시했는데, 그러면 엔진의 "모델 전용 + 사용자 핀이면
+    머문다" 예외가 걸려 **계정 전체가 막혔는데도 그 계정에 머문다.** 검증 대상도 다르다 —
+    창이 아니라 usage 의 spend 블록으로 판정해야 한다.
+    """
     hit = rp.parse(line("You've hit your monthly spend limit."), NOW)
-    assert hit is not None and hit.model_scoped is True and hit.resets_at is None
+    assert hit is not None and hit.resets_at is None
+    assert hit.kind is rp.HitKind.MONTHLY_SPEND
+    assert hit.model_scoped is False
     assert hit.effective_resets_at(NOW) == NOW + 24 * 3600
+
+
+def test_window_hit_default_kind():
+    hit = rp.parse(line("You've hit your usage limit. resets 8am (Asia/Seoul)"), NOW)
+    assert hit is not None and hit.kind is rp.HitKind.WINDOW
 
 
 def test_p1_time_only_rolls_to_future():

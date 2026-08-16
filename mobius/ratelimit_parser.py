@@ -14,6 +14,7 @@ import datetime
 import json
 import re
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -37,10 +38,25 @@ _MONTHS = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
            "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
 
 
+class HitKind(Enum):
+    """이 hit 를 usage 스냅샷의 **어느 필드로 검증하는가.**
+
+    로그 라인은 계정을 밝히지 않으므로 판정은 usage API 가 한다(daemon._verify_hit).
+    창 소진과 지출 한도는 응답의 서로 다른 블록에 있어, 종류를 모르면 지출 한도 hit 가
+    "창은 여유 있음 = 남의 hit" 로 오판돼 통째로 버려진다.
+    """
+
+    WINDOW = "window"                # 5시간/7일 창 — five_hour·seven_day 로 검증
+    MONTHLY_SPEND = "monthly_spend"  # 월간 지출 한도 — spend 블록으로 검증
+
+
 @dataclass
 class RateLimitHit:
     resets_at: Optional[float]     # epoch 초. 없으면(월간 지출 등) None.
+    # ★ 모델 전용 한도(예: Fable 주간)인가. **월간 지출 한도는 여기 해당하지 않는다** —
+    #   지출 한도는 계정 전체를 막으므로 "핀이면 머문다" 예외를 주면 안 된다(구 포팅 오류).
     model_scoped: bool = False
+    kind: HitKind = HitKind.WINDOW
 
     def effective_resets_at(self, now: float) -> float:
         """리셋 시각 없는 이벤트의 보수적 폴백: now + 24시간."""
@@ -161,8 +177,8 @@ def parse(line: str, now: float) -> Optional[RateLimitHit]:
     if not _is_candidate(obj):
         return _legacy_epoch_hit(text, reference)  # 구조화 필드 없으면 P4만 인정
 
-    if _MONTHLY_SPEND.search(text):  # P3 월간 지출 = 모델 전용
-        return RateLimitHit(resets_at=None, model_scoped=True)
+    if _MONTHLY_SPEND.search(text):  # P3 월간 지출 — 리셋 시각 없음, spend 블록으로 검증
+        return RateLimitHit(resets_at=None, kind=HitKind.MONTHLY_SPEND)
 
     m = _DATE_AND_TIME.search(text)  # P2 날짜+시각(주간)
     if m:
