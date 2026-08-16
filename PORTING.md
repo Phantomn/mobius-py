@@ -212,10 +212,16 @@ PR #21 본문을 읽고 **그 판단이 틀렸음을 확인해 되돌렸다** �
 뺐고, `HitKind` 는 판정 분기가 아니라 **"지출 한도는 모델 전용 한도가 아니다"의 표식**
 으로 남는다(결함 3).
 
-**usage 응답 실측 (2026-08-16, Max 20x).** `limits[]` 키가 **아예 없다.** 모델별 한도는
-최상위 형제 블록(`seven_day_opus`/`seven_day_sonnet`/`seven_day_cowork`/`seven_day_omelette`/
-`seven_day_oauth_apps` + 코드네임들)으로 오고 전부 `null` 이다. 즉 양쪽 구현의
-`limits[].weekly_scoped` 파싱은 이 응답 형태에서 한 번도 발동한 적이 없다(→ upstream #19 답신).
+**usage 응답 실측 (2026-08-16, Max 20x).** `limits[]` 는 있고 `weekly_scoped` 항목도
+들어 있다 — 단 `percent: 0`, `resets_at: null`, `is_active: false` (`scope.model.display_name`
+= "Fable"). 즉 파싱은 되지만 소진을 밟은 적이 없다. 모델별 한도는 최상위 형제 키
+(`seven_day_opus`/`seven_day_sonnet`/`seven_day_cowork`/`seven_day_omelette`/
+`seven_day_oauth_apps` + 코드네임들)에도 중복 표현돼 있고 그쪽은 전부 `null` 이다 —
+소진 시 어느 쪽이 정본인지는 실측 전까지 모른다.
+
+> 이 문단의 첫 판정("`limits[]` 키가 아예 없다", 커밋 f082562 메시지에도 그대로 들어갔다)은
+> **오독이었다.** 응답 아래쪽에 있는 것을 상단 블록만 보고 단정했다. 판정 근거는 응답 원문을
+> 끝까지 읽고 적는다.
 
 ---
 
