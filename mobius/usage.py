@@ -73,23 +73,13 @@ def parse(data: bytes, now: float) -> Optional[UsageSnapshot]:
         scoped.append(ScopedUsageLimit(label=name, percent=pct,
                                        resets_at=_iso_to_epoch(rs) if isinstance(rs, str) else None))
 
-    # 월간 지출 한도 — 계정 창과 **다른 블록**에 있다. 이걸 안 읽으면 P3(월간 지출) 로그
-    # hit 를 창으로만 검증하게 되고, 창이 여유면 "남의 hit" 로 판정돼 진짜 소진이 버려진다.
-    spend = obj.get("spend")
-    spend_enabled: Optional[bool] = None
-    spend_percent: Optional[float] = None
-    if isinstance(spend, dict):
-        en = spend.get("enabled")
-        if isinstance(en, bool):
-            spend_enabled = en
-        spend_percent = _pct(spend.get("percent"))
-
-    if five_pct is None and week_pct is None and not scoped and spend_enabled is None:
+    # 응답의 `spend` 블록은 **일부러 읽지 않는다** — 지출 한도 소진은 "계정을 못 쓴다"가
+    # 아니다(플랜 창이 여유면 세션은 정상 동작한다). P3 로그 hit 도 창으로 교차 확인한다.
+    if five_pct is None and week_pct is None and not scoped:
         return None
     return UsageSnapshot(five_hour_percent=five_pct, five_hour_resets_at=five_reset,
                          seven_day_percent=week_pct, seven_day_resets_at=week_reset,
-                         fetched_at=now, scoped_limits=scoped,
-                         spend_enabled=spend_enabled, spend_percent=spend_percent)
+                         fetched_at=now, scoped_limits=scoped)
 
 
 Transport = Callable[[str], tuple]

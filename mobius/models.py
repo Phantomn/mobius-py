@@ -241,9 +241,6 @@ class UsageSnapshot:
     # ponytail: 파싱만 하고 판정에는 쓰지 않는다 — 아래 exhausted_account_window 주석 참조.
     # upstream 이 유지하는 와이어 포맷이라 대응표(PORTING.md)를 위해 남긴다.
     scoped_limits: list[ScopedUsageLimit] = field(default_factory=list)
-    # 월간 지출 한도 블록(`spend`). enabled=False 면 이 계정엔 지출 한도가 없다.
-    spend_enabled: Optional[bool] = None
-    spend_percent: Optional[float] = None
 
     def exhausted_account_window(self) -> bool:
         """**계정 자체**(5시간·7일)가 막혔는가 — 리셋 시각의 유효성과 무관.

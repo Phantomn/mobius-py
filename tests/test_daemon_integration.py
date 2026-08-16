@@ -264,32 +264,13 @@ def _spend_line():
                        "timestamp": "2023-11-14T12:00:00.000Z"}) + "\n"
 
 
-def _usage_spend(enabled, percent):
-    return json.dumps({"five_hour": {"utilization": 9.0, "resets_at": "2023-11-15T06:00:00Z"},
-                       "spend": {"enabled": enabled, "percent": percent}}).encode()
+def test_daemon_ignores_spend_hit_when_windows_are_free(env):
+    """★ 월간 지출 한도 hit 는 그 자체로 "계정을 못 쓴다"의 증거가 아니다.
 
-
-def test_daemon_records_monthly_spend_from_spend_block(env):
-    """★ 지출 한도 hit 를 창으로만 검증하면 **항상** 버려진다(창은 여유니까).
-
-    파서가 응답의 spend 블록을 통째로 버리고 있어서, P3 hit 는 검증 도입 이후 100%
-    폐기됐다 — 도입 전에는 기록되던 것이라 회귀였다.
+    upstream 실측(2026-07-13): 이 메시지는 표시 우선순위(override)라 **플랜 창이 여유인
+    상태에서도 뜨고 세션은 정상 동작한다.** 그대로 기록하면 멀쩡한 계정이 24시간 막힌다.
     """
-    d, a, log = _hit_daemon(env, lambda t: (200, _usage_spend(True, 100.0)))
-
-    log.write_text(_spend_line())
-    d.tick(NOW + 1)
-
-    d.store.reload()
-    rl = d.store.file.accounts[0].rate_limit
-    assert rl is not None
-    assert rl.resets_at == NOW + 1 + 24 * 3600     # 지출 한도엔 리셋 시각이 없다 → 24h 폴백
-    assert rl.model_scoped is False                # 계정 전체가 막힌 것 — 핀 예외 대상 아님
-
-
-def test_daemon_refutes_spend_hit_when_no_spend_limit(env):
-    """지출 한도가 없는 계정(enabled=false)이면 그 hit 는 이 계정 것일 수 없다 — 확정 반증."""
-    d, a, log = _hit_daemon(env, lambda t: (200, _usage_spend(False, 0.0)))
+    d, a, log = _hit_daemon(env, lambda t: (200, _USAGE_OK))   # 창 12% — 여유
 
     log.write_text(_spend_line())
     d.tick(NOW + 1)
@@ -299,20 +280,18 @@ def test_daemon_refutes_spend_hit_when_no_spend_limit(env):
     assert d._pending_hit is None
 
 
-def test_daemon_holds_spend_hit_when_under_limit(env):
-    """지출 한도는 있는데 100% 미만 — 소진 상태의 spend 블록을 실측한 적이 없어 보류한다.
-
-    반증으로 단정하면 스키마 추측이 틀렸을 때 진짜 소진을 조용히 버린다. 보류의 최악은
-    조회 몇 번과 15분 뒤 로그 한 줄이다.
-    """
-    d, a, log = _hit_daemon(env, lambda t: (200, _usage_spend(True, 40.0)))
+def test_daemon_records_spend_hit_when_windows_exhausted(env):
+    """반대로 진짜 창 소진과 겹치면 이 메시지가 창 소진을 **가린다** — 무시하지 않고 확인한다."""
+    d, a, log = _hit_daemon(env, lambda t: (200, _USAGE_EXHAUSTED))
 
     log.write_text(_spend_line())
     d.tick(NOW + 1)
 
     d.store.reload()
-    assert d.store.file.accounts[0].rate_limit is None
-    assert d._pending_hit is not None
+    rl = d.store.file.accounts[0].rate_limit
+    assert rl is not None
+    assert rl.resets_at == _RESET_EPOCH   # 24h 폴백이 아니라 창의 실제 리셋 시각
+    assert rl.model_scoped is False       # 지출 한도는 모델 전용 한도가 아니다(핀 예외 없음)
 
 
 def test_daemon_ignores_model_scoped_limit(env):

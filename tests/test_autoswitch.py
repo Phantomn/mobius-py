@@ -1,7 +1,7 @@
 from mobius.autoswitch import (AutoSwitchEngine, CandidateProbeAction, DecisionKind,
                                SwitchReason)
 from mobius.models import AccountProfile, AccountsFile, AdvisoryRecord, RateLimitInfo
-from mobius.ratelimit_parser import RateLimitHit
+from mobius.ratelimit_parser import HitKind, RateLimitHit
 
 NOW = 1000.0
 
@@ -58,6 +58,20 @@ def test_model_scoped_pinned_stays():
     d = eng.on_rate_limit_hit(make_file(accounts=accts),
                               RateLimitHit(resets_at=None, model_scoped=True), NOW)
     assert d.kind == DecisionKind.NONE
+
+
+def test_monthly_spend_pinned_still_leaves():
+    """★ 월간 지출 한도는 **모델 전용 한도가 아니다** — 핀이어도 떠난다.
+
+    구 포팅은 P3 를 model_scoped=True 로 표시해, 계정 전체가 막혔는데도 핀 예외가 걸려
+    그 계정에 머물렀다.
+    """
+    accts = [AccountProfile(id="a", nickname="a", email_address="a@x", user_pinned=True),
+             AccountProfile(id="b", nickname="b", email_address="b@x")]
+    eng = AutoSwitchEngine()
+    d = eng.on_rate_limit_hit(make_file(accounts=accts),
+                              RateLimitHit(resets_at=NOW + 500, kind=HitKind.MONTHLY_SPEND), NOW)
+    assert d.kind == DecisionKind.SWITCH_TO and d.target_id == "b"
 
 
 def test_ontick_primary_recovery():

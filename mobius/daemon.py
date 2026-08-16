@@ -70,17 +70,12 @@ def verify_verdict(snap: UsageSnapshot, hit: RateLimitHit,
     돌려주는 리셋 시각은 CONFIRMED 일 때만 의미가 있고, None 이면 호출자가
     hit 의 폴백(24시간)을 쓴다.
     """
-    if hit.kind == HitKind.MONTHLY_SPEND:
-        # 지출 한도가 애초에 없는 계정이면 이 hit 는 이 계정 것일 수 없다 — 확정 반증.
-        if snap.spend_enabled is False:
-            return (Verdict.REFUTED, None)
-        if snap.spend_percent is not None and snap.spend_percent >= 100:
-            return (Verdict.CONFIRMED, None)   # 지출 한도엔 리셋 시각이 없다 → 24h 폴백
-        # ponytail: 소진 상태의 spend 블록을 **실측한 적이 없다**(이 환경은 enabled=false).
-        # percent<100 을 반증으로 쓰면 스키마 추측이 틀렸을 때 진짜 소진을 조용히 버린다 —
-        # 보류로 두면 최악이 조회 몇 번과 15분 뒤 로그 한 줄이다. 관측되면 규칙을 좁힌다.
-        return (Verdict.UNKNOWN, None)
-
+    # ★ 월간 지출 한도(P3)도 **계정 창으로 교차 확인한다** — 지출 한도 블록으로 판정하지
+    #   않는다. upstream 실측(2026-07-13): 이 메시지는 표시 우선순위(override)라 플랜 창이
+    #   여유인 상태에서도 뜨고 세션은 정상 동작한다. 즉 P3 자체는 "계정을 못 쓴다"의 증거가
+    #   아니다 — 그대로 기록하면 24h 동안 멀쩡한 계정이 막힌다. 반대로 진짜 창 소진과 겹치면
+    #   이 메시지가 창 소진을 가리므로, 무시하지 말고 창을 확인해야 한다.
+    #   (kind 는 그래서 판정 분기가 아니라 "지출 한도는 모델 전용 한도가 아니다"의 표식이다.)
     if not snap.exhausted_account_window():
         return (Verdict.REFUTED, None)
     reset = snap.account_reset_after(now)
