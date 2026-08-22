@@ -57,6 +57,12 @@ class RateLimitHit:
     #   지출 한도는 계정 전체를 막으므로 "핀이면 머문다" 예외를 주면 안 된다(구 포팅 오류).
     model_scoped: bool = False
     kind: HitKind = HitKind.WINDOW
+    # --- 귀속 구간 (이슈 #19). 워처가 채운다. bound_at 이 None 이면 복원 실패 → usage 검증 ---
+    # 이 요청이 자격증명에 묶였을 수 있는 **가장 이른** 시각(턴 시작). turn_start_at() 참조.
+    bound_at: Optional[float] = None
+    # 이 라인이 기록된 시각 = 구간의 끝. hit 자체 타임스탬프는 **요청 시각이 아니라** 429
+    # 재시도가 끝난 시각이다(실측 2분 6초). 그래서 점이 아니라 구간으로 판정한다.
+    observed_at: Optional[float] = None
 
     def effective_resets_at(self, now: float) -> float:
         """리셋 시각 없는 이벤트의 보수적 폴백: now + 24시간."""
@@ -154,6 +160,44 @@ def _legacy_epoch_hit(text: str, reference: float) -> Optional[RateLimitHit]:
     return None
 
 
+def turn_start_at(obj: dict) -> Optional[float]:
+    """이 라인이 **턴의 시작**(사용자 입력)이면 그 시각, 아니면 None.
+
+    ★ 왜 필요한가 (이슈 #19 의 근본): 한도 에러 라인에는 계정이 적혀 있지 않고, 그 라인의
+      **자체 타임스탬프는 요청 시각이 아니다** — 429 재시도가 끝난 뒤에 찍힌다(실측
+      2026-08-15: 재시도 창 2분 6초, 쿨다운 120초보다 길다). 자격증명은 턴 시작에 묶이므로
+      (upstream #20 정정: 실행 중 세션은 **다음 입력부터** 새 계정), 이 시각이 곧
+      "누구의 요청이었나" 의 좌표다. 워처가 파일별로 이 값을 이어 들고 hit 에 붙인다.
+
+    판별: type=="user" 이면서 tool_result 가 아니고(=도구 결과 주입이 아님) prompt 메타가
+    붙은 라인. 실측 88/88 hit 에서 같은 파일 안에 선행 턴 시작 라인이 존재했다
+    (서브에이전트 파일 61건 포함).
+    """
+    if obj.get("type") != "user" or obj.get("toolUseResult") is not None:
+        return None
+    if not (obj.get("promptSource") or obj.get("promptId")):
+        return None
+    return _timestamp(obj)
+
+
+def scan_line(line: str, now: float) -> tuple[Optional[RateLimitHit], Optional[float]]:
+    """한 줄을 **1회만** 디코드해 (hit, 턴 시작 시각) 을 함께 돌려준다.
+
+    워처는 모든 라인을 훑으므로 hit 판정과 턴 경계 추적이 디코드를 나눠 쓰면 비용이 두 배가
+    된다. 둘 중 하나만 필요한 호출자는 parse() 를 그대로 쓴다.
+    """
+    try:
+        obj = json.loads(line)
+    except ValueError:
+        return (None, None)
+    if not isinstance(obj, dict):
+        return (None, None)
+    hit = _parse_obj(obj, now)
+    if hit is not None:
+        hit.observed_at = _timestamp(obj)
+    return (hit, turn_start_at(obj))
+
+
 def parse(line: str, now: float) -> Optional[RateLimitHit]:
     try:
         obj = json.loads(line)
@@ -161,7 +205,10 @@ def parse(line: str, now: float) -> Optional[RateLimitHit]:
         return None
     if not isinstance(obj, dict):
         return None
+    return _parse_obj(obj, now)
 
+
+def _parse_obj(obj: dict, now: float) -> Optional[RateLimitHit]:
     text = _event_text(obj)
     if not text:
         return None

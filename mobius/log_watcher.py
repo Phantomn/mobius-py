@@ -21,6 +21,10 @@ class SessionLogWatcher:
         self.env = env
         self.recent_window = recent_window
         self._offsets: dict[str, int] = {}
+        # 파일별 "마지막으로 본 턴 시작 시각" — hit 의 귀속 좌표(ratelimit_parser.turn_start_at).
+        # 스캔은 append 만 읽으므로 이 값을 스캔 사이에 이어 들어야 한다. 프라이밍으로 건너뛴
+        # 구간의 턴은 복원되지 않는다(=None) — 그건 데몬이 usage 검증으로 넘긴다.
+        self._turn_start: dict[str, float] = {}
         self._primed = False
 
     def scan(self, now: float) -> list[RateLimitHit]:
@@ -78,9 +82,48 @@ class SessionLogWatcher:
             for line in text.split("\n"):
                 if not line:
                     continue
-                hit = ratelimit_parser.parse(line, now)
+                hit, turn_start = ratelimit_parser.scan_line(line, now)
                 if hit is not None:
+                    hit.bound_at = self._binding_lower_bound(path)
                     hits.append(hit)
+                if turn_start is not None:
+                    self._turn_start[path] = turn_start
+
+    def _binding_lower_bound(self, path: str) -> Optional[float]:
+        """이 파일의 hit 이 자격증명에 묶였을 수 있는 **가장 이른** 시각.
+
+        ★ 서브에이전트(`.../<sessionId>/subagents/**.jsonl`)는 부모와 **같은 CLI 프로세스**라
+          자격증명이 부모 턴에 묶인다. 자기 파일의 프롬프트 라인을 쓰면 좌표가 늦게 잡히는데
+          (실측 2026-08-22: 부모 턴 시작과 p50 **21분**, 61건 중 57건이 재시도 창 초과),
+          **늦은 좌표 = 새 계정 = 이슈 #19 와 같은 방향의 오귀인**이다. 그래서 부모 세션
+          파일의 턴 시작까지 넓혀 둘 중 이른 쪽을 쓴다.
+
+        부모 쪽을 모르면(아직 스캔 전 등) None — 추측하지 않고 usage 검증으로 넘긴다.
+        """
+        own = self._turn_start.get(path)
+        parent = self._parent_session_path(path)
+        if parent is None:
+            return own
+        theirs = self._turn_start.get(parent)
+        if theirs is None or own is None:
+            return None          # 구간의 한쪽을 모르면 구간이 성립하지 않는다
+        return min(own, theirs)
+
+    @staticmethod
+    def _parent_session_path(path: str) -> Optional[str]:
+        """서브에이전트 로그면 부모 세션 파일 경로, 아니면 None.
+
+        `<proj>/<sessionId>/subagents/[...]/agent-*.jsonl` → `<proj>/<sessionId>.jsonl`.
+        중첩(workflows/)도 **첫** subagents 를 기준으로 잘라 같은 부모를 가리킨다.
+        실측: 서브에이전트 hit 61건 전부 이 규칙으로 부모 파일이 실존했다.
+        """
+        parts = path.split(os.sep)
+        if "subagents" not in parts:
+            return None
+        head = parts[:parts.index("subagents")]
+        if not head:
+            return None
+        return os.sep.join(head) + ".jsonl"
 
     @staticmethod
     def _offset_after_last_newline(f, start: int, end: int) -> Optional[int]:

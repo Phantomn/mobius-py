@@ -46,6 +46,9 @@ PENDING_HIT_TTL = 15 * 60.0
 # 후보 탐색에서 만료된 폴백 토큰을 refresh 로 승격할 때의 계정당 재시도 쿨다운.
 # transient 실패가 5분마다 회전 시도로 반복되지 않게 한다.
 PROBE_REFRESH_COOLDOWN = 30 * 60.0
+# 활성 계정 타임라인 보관 길이. 가장 오래된 항목보다 이른 hit 는 "모름" 으로 떨어진다 —
+# 실측 최장 턴이 56분이므로 전환이 잦아도 그 지평을 덮는다.
+ACTIVE_TIMELINE_MAX = 64
 
 class Verdict(Enum):
     """로그 hit 판정 — **3-값이다.**
@@ -112,6 +115,10 @@ class Daemon:
         # 판정 못 한 트리거 (account_id, hit, 최초 도착 시각). 슬롯 하나면 충분하다 —
         # 같은 계정의 여러 hit 는 구분 불가능한 같은 증거("뭔가 한도라고 했다")다.
         self._pending_hit: Optional[tuple[str, RateLimitHit, float]] = None
+        # 활성 계정 타임라인 (관찰 시각, 계정 id) — hit 의 귀속 시각을 계정으로 되돌린다.
+        # 자기 전환은 즉시, 외부 전환은 다음 틱(≤3초)에 기록된다. _owner_at 참조.
+        self._active_timeline: list[tuple[float, float, Optional[str]]] = []
+        self._last_tick_at: Optional[float] = None
         # usage 조회 transport — 테스트가 네트워크 없이 주입한다(None = 실제 HTTP).
         self.usage_transport = None
         self._stop = False
@@ -161,6 +168,10 @@ class Daemon:
                 except Exception as e:
                     print(f"[mobius] 임계값 폴 오류: {e}", flush=True)
 
+        # 전환(자기·외부 무관)을 타임라인에 남긴다 — 스캔보다 **먼저**. 이번 틱에 읽을 hit 의
+        # 귀속 좌표가 이 시각 이전이어야 하므로, 늦게 기록하면 방금 전환을 못 본 채 판정한다.
+        self._note_active(now)
+
         self._clear_expired_rate_limits(now)
         self._recheck_flagged_accounts(now)
 
@@ -175,6 +186,15 @@ class Daemon:
         #   새 hit 들은 is_limited 게이트에 걸려 조회 없이 끝난다.
         self._retry_pending_hit(active_id, now)
         for hit in self.watcher.scan(now):
+            # ★ 먼저 **귀속 시각으로 주인을 찾는다** (이슈 #19 근본 수정). 성공하면 네트워크 0.
+            #   월간 지출 hit(P3)은 제외 — 주인은 알아도 "그게 창 소진인가" 는 여전히
+            #   교차 확인이 필요하다(그대로 기록하면 24h 오탐). 귀속과 판정은 다른 질문이다.
+            # 리셋 시각 없는 변형(P5)은 귀속돼도 기록하지 않는다 — 24시간 폴백을 박으면
+            # 실제로 2시간 뒤 풀릴 계정을 하루 막는다. 그 시각은 API 만 안다.
+            owner = self._owner_for(hit, now) if hit.resets_at is not None else None
+            if owner is not None and hit.kind is HitKind.WINDOW:
+                self._record_attributed(owner, hit, now)
+                continue
             if active_id is None:
                 continue
             verdict, info = self._verify_hit(active_id, hit, now)
@@ -189,6 +209,7 @@ class Daemon:
             if verdict == Verdict.CONFIRMED and info is not None:
                 self._record_and_apply(active_id, info, hit, now)
         self._apply(self.engine.on_tick(self.store.file, now), now)
+        self._last_tick_at = now
 
     # ---------- 결정 실행 ----------
 
@@ -222,6 +243,8 @@ class Daemon:
             print(f"[mobius] 자동 전환 실패: {e}", flush=True)
             return
         self.engine.note_switched(now)
+        # 자기 전환은 **시각을 정확히 안다** — 다음 틱의 관찰(불확실 구간)을 기다리지 않는다.
+        self._note_active(now, exact=True)
         try:
             self.store.set_auto_switched_from_primary(
                 reason in (SwitchReason.ACTIVE_EXHAUSTED, SwitchReason.THRESHOLD_ADVISORY))
@@ -343,6 +366,79 @@ class Daemon:
             if (s.five_hour_percent or 0.0) < threshold:
                 return p.id     # 임계값 미만 = 검증된 후보
         return None
+
+    # ---------- 귀속 (이슈 #19 근본 수정) ----------
+
+    def _note_active(self, now: float, exact: bool = False) -> None:
+        """활성 계정이 바뀌었으면 타임라인에 남긴다 — `(가능한 최이른, 관찰, 계정)`.
+
+        ★ 두 시각을 따로 드는 이유: **자기 전환만 시각을 안다.** 외부 전환(사용자의
+          `claude /login`, 다른 도구)은 reconcile 이 늦게 관찰하므로 실제 시각은
+          (직전 틱, 지금] 어딘가다. 하나로 접으면 그 폭이 "확실히 안 바뀌었다"로
+          둔갑해, 이 수정이 없애려는 추측이 다시 들어온다.
+        """
+        active = self.store.file.active_account_id
+        if self._active_timeline and self._active_timeline[-1][2] == active:
+            return
+        earliest = now if exact else (self._last_tick_at
+                                      if self._last_tick_at is not None else float("-inf"))
+        self._active_timeline.append((earliest, now, active))
+        del self._active_timeline[:-ACTIVE_TIMELINE_MAX]
+
+    def _owner_for(self, hit: RateLimitHit, now: float) -> Optional[str]:
+        """이 hit 의 주인. **구간 내내 활성이 그대로였을 때만** 답한다.
+
+        ★ 왜 점이 아니라 구간인가 (이슈 #19 의 근본): hit 의 타임스탬프는 요청 시각이 아니라
+          429 **재시도가 끝난** 시각이다(실측 2026-08-15: 2분 6초 — 엔진 쿨다운 120초보다
+          길어서 시간 창으로는 못 막는다). 요청이 살아 있던 구간
+          `[자격증명이 묶였을 수 있는 최이른 시각, 로그에 찍힌 시각]` 안에서 전환이
+          일어날 수 있었다면 이 hit 의 주인은 **원리적으로 불확정**이다.
+
+        ★ 이 판정은 "자격증명이 턴 시작에 묶인다" 같은 **가정을 쓰지 않는다.** 구간 안에
+          전환이 없었다면 어떤 결합 규칙이든 답은 하나다. 있었다면 답하지 않는다 —
+          그때만 usage 검증(계정별 토큰 = 오귀인 구조적 불가)으로 넘긴다.
+          즉 이 수정은 검증을 **대체하지 않고 그 대상을 정확히 좁힌다**: 기존 코드는
+          모든 hit 을 조회했고(평시 네트워크 0 계약 훼손), 그 전에는 모든 hit 을 믿었다.
+        """
+        bind = hit.bound_at
+        if bind is None:
+            return None
+        end = hit.observed_at if hit.observed_at is not None else now
+        if end < bind:
+            end = bind
+        timeline = self._active_timeline
+        # bind 시점에 **이미 확정돼 있던** 상태(관찰까지 끝난 항목)를 찾는다.
+        idx = -1
+        for i, (_earliest, observed, _account) in enumerate(timeline):
+            if observed <= bind:
+                idx = i
+            else:
+                break
+        if idx < 0:
+            return None                       # 데몬 시작 전 — 모른다
+        if idx + 1 < len(timeline) and timeline[idx + 1][0] <= end:
+            return None                       # 구간 안에서 바뀌었을 수 있다
+        return timeline[idx][2]
+
+    def _record_attributed(self, account_id: str, hit: RateLimitHit, now: float) -> None:
+        """귀속이 확정된 창 소진을 기록한다 — usage 조회 없이.
+
+        엔진 결정은 **그 계정이 아직 활성일 때만** 돌린다. on_rate_limit_hit 은 hit 을 인자
+        계정이 아니라 현재 활성 계정에 얹어 판단하므로, 이미 떠난 계정의 hit 로 부르면 엉뚱한
+        계정을 소진으로 보고 결정한다. 기록만 남기면 on_tick 의 자가복구가 이어 받는다.
+        """
+        profile = next((a for a in self.store.file.accounts if a.id == account_id), None)
+        if profile is None or profile.is_limited(now):
+            return                      # 같은 소진의 후속 hit — 알림 폭풍 차단
+        info = RateLimitInfo(resets_at=hit.effective_resets_at(now), recorded_at=now,
+                             model_scoped=hit.model_scoped)
+        if account_id == self.store.file.active_account_id:
+            self._record_and_apply(account_id, info, hit, now)
+            return
+        try:
+            self.store.update(account_id, lambda p, v=info: setattr(p, "rate_limit", v))
+        except Exception:
+            pass
 
     def _record_and_apply(self, account_id: str, info: RateLimitInfo,
                           hit: RateLimitHit, now: float) -> None:
