@@ -1,24 +1,3 @@
 {
-  "mcpServers": {
-    "serena": {
-      "type": "stdio",
-      "command": "serena",
-      "args": [
-        "start-mcp-server",
-        "--context=claude-code",
-        "--project-from-cwd"
-      ],
-      "env": {},
-      "alwaysLoad": true
-    },
-    "codegraph": {
-      "type": "stdio",
-      "command": "codegraph",
-      "args": [
-        "serve",
-        "--mcp"
-      ],
-      "alwaysLoad": true
-    }
-  }
+  "mcpServers": {}
 }
