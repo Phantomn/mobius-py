@@ -1,0 +1,35 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "serena-hooks activate --client claude-code",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "codegraph prompt-hook"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "mcp__codegraph__*"
+    ]
+  },
+  "env": {
+    "CLAUDE_CODE_THRIFTY_SONIC": "0",
+    "HARNESS_CODEREAD_GUARD": "1"
+  }
+}
