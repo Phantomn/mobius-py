@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from . import usage
 from .claude_config import ClaudeConfigIO
 from .env import MobiusEnvironment
 from .models import AccountProfile
@@ -37,6 +38,36 @@ def _fmt_reset(p: AccountProfile, now: float) -> str:
     return f"  [한도 소진 {mins // 60}시간 {mins % 60}분 후 리셋]"
 
 
+def _fmt_in(epoch: Optional[float], now: float) -> str:
+    if epoch is None or epoch <= now:
+        return "-"
+    mins = int((epoch - now) / 60)
+    d, rem = divmod(mins, 1440)
+    hm = f"{rem // 60}시간 {rem % 60}분"
+    when = time.strftime("%H:%M" if d == 0 else "%m/%d %H:%M", time.localtime(epoch))
+    return f"{d}일 {hm} 후 ({when})" if d else f"{hm} 후 ({when})"
+
+
+def _usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
+    snap = ctx.store.secret(p.id)
+    if snap is None or p.needs_reauth:
+        return []
+    try:
+        u = usage.fetch(snap.credentials_blob, now)
+    except Exception:
+        u = None
+    if u is None:
+        return ["      [사용량 조회 실패]"]
+
+    def row(label, pct, resets_at):
+        p_ = "?" if pct is None else f"{pct:.0f}%"
+        return f"      {label:<8}{p_:>4}  리셋 {_fmt_in(resets_at, now)}"
+    rows = [row("5시간", u.five_hour_percent, u.five_hour_resets_at),
+            row("7일", u.seven_day_percent, u.seven_day_resets_at)]
+    rows += [row(f"7일 {s.label}", s.percent, s.resets_at) for s in u.scoped_limits]
+    return rows
+
+
 def _cmd_list(_args) -> int:
     ctx = _Ctx()
     ctx.switcher.reconcile()
@@ -51,6 +82,8 @@ def _cmd_list(_args) -> int:
         reauth = "  [재로그인 필요]" if p.needs_reauth else ""
         print(f"{active} {role}  {p.nickname}  <{p.email_address}>  "
               f"{p.tier_description}{_fmt_reset(p, now)}{reauth}")
+        for line in _usage_lines(ctx, p, now):
+            print(line)
     return 0
 
 
