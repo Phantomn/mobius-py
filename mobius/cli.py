@@ -62,10 +62,8 @@ def _usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
     def row(label, pct, resets_at):
         p_ = "?" if pct is None else f"{pct:.0f}%"
         return f"      {label:<8}{p_:>4}  리셋 {_fmt_in(resets_at, now)}"
-    rows = [row("5시간", u.five_hour_percent, u.five_hour_resets_at),
+    return [row("5시간", u.five_hour_percent, u.five_hour_resets_at),
             row("7일", u.seven_day_percent, u.seven_day_resets_at)]
-    rows += [row(f"7일 {s.label}", s.percent, s.resets_at) for s in u.scoped_limits]
-    return rows
 
 
 def _cmd_list(_args) -> int:
