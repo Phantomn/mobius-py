@@ -152,6 +152,8 @@ def _cmd_status(_args) -> int:
     primary = ctx.store.file.primary
     role = "primary" if primary and active.id == primary.id else "fallback"
     print(f"활성: {active.nickname} <{active.email_address}> ({role}){_fmt_reset(active, now)}")
+    for line in _usage_lines(ctx, active, now):
+        print(line)
     print(f"자동 전환: {'켜짐' if ctx.store.file.auto_switch_enabled else '꺼짐'}")
     f = ctx.store.file
     if f.advisory_enabled:
