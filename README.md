@@ -49,6 +49,7 @@ pip install --user -e mobius-py
 mobius capture <이름>     # 현재 claude 로그인 계정을 프로필로 저장 (여러 계정을 각각 로그인→capture)
 mobius list              # 등록된 계정 목록 (● = 현재 활성)
 mobius switch <이름>      # 해당 계정으로 전환
+mobius remove <이름>      # 안 쓰는 계정 삭제 (활성 계정은 거부 — 먼저 switch)
 mobius status            # 현재 활성 계정 + 자동 전환 상태
 mobius auto on|off       # 자동 fallback 켜기/끄기
 mobius advisory          # 한도 차기 전 미리 전환 설정 보기

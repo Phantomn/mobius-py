@@ -123,6 +123,24 @@ def _cmd_primary(args) -> int:
     return 0
 
 
+def _cmd_remove(args) -> int:
+    ctx = _Ctx()
+    ctx.switcher.reconcile()
+    target = next((a for a in ctx.store.file.accounts if a.nickname == args.name), None)
+    if target is None:
+        names = ", ".join(a.nickname for a in ctx.store.file.accounts)
+        print(f"'{args.name}' 계정 없음. 등록된 계정: {names}", file=sys.stderr)
+        return 1
+    # 활성 계정은 claude 에 로그인된 상태라 지워도 데몬이 미등록 라이브 계정으로 다시 등록한다.
+    if target.id == ctx.store.file.active_account_id:
+        print(f"{target.nickname} 은(는) 현재 활성 계정이라 삭제할 수 없습니다. "
+              "먼저 `mobius switch` 로 다른 계정으로 전환하세요.", file=sys.stderr)
+        return 1
+    ctx.store.remove(target.id)
+    print(f"삭제 완료: {target.nickname} <{target.email_address}> (저장된 자격증명 사본도 삭제)")
+    return 0
+
+
 def _cmd_status(_args) -> int:
     ctx = _Ctx()
     ctx.switcher.reconcile()
@@ -245,6 +263,10 @@ def _build_parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("primary", help="지정 계정을 주 계정(primary)으로 승격 — main/fallback 교체")
     pr.add_argument("name", help="주 계정으로 만들 닉네임")
     pr.set_defaults(func=_cmd_primary)
+
+    rm = sub.add_parser("remove", help="등록된 계정 프로필과 저장된 자격증명 사본 삭제")
+    rm.add_argument("name", help="삭제할 계정 닉네임")
+    rm.set_defaults(func=_cmd_remove)
 
     sub.add_parser("status", help="현재 상태").set_defaults(func=_cmd_status)
 
