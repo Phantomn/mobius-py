@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from . import usage
+from . import credentials, usage
 from .claude_config import ClaudeConfigIO
 from .env import MobiusEnvironment
 from .models import AccountProfile
@@ -48,16 +48,45 @@ def _fmt_in(epoch: Optional[float], now: float) -> str:
     return f"{d}일 {hm} 후 ({when})" if d else f"{hm} 후 ({when})"
 
 
+def _usage_failure(blob: bytes, responses: list[tuple], err: Optional[Exception],
+                   now: float) -> str:
+    if err is not None and not isinstance(err, usage.Unauthorized):
+        return f"네트워크 오류 — {err}"
+    if not responses:
+        return "저장된 토큰 없음"
+    # 만료 토큰에 서버는 401 이 아니라 429 를 주기도 한다(실측 2026-10-26) — 코드보다 만료를 먼저 본다.
+    exp = credentials.expires_at(blob)
+    if exp is not None and exp <= now:
+        return "저장된 토큰 만료"
+    if err is not None:
+        return "토큰 거부(401/403) — 재로그인 필요"
+    status = responses[-1][0]
+    if status == 429:
+        return "요청 제한(429)"
+    if status == 200:
+        return "응답 해석 실패"
+    return f"HTTP {status}"
+
+
 def _usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
     snap = ctx.store.secret(p.id)
     if snap is None or p.needs_reauth:
         return []
+    responses: list[tuple] = []
+
+    def transport(token: str) -> tuple:
+        # fetch 는 실패를 전부 None 으로 접는다(데몬이 그 계약에 기댄다) — 원인 표시용으로 응답만 엿본다.
+        responses.append(usage._default_transport(token))
+        return responses[-1]
+
+    err: Optional[Exception] = None
     try:
-        u = usage.fetch(snap.credentials_blob, now)
-    except Exception:
-        u = None
+        u = usage.fetch(snap.credentials_blob, now, transport)
+    except Exception as e:
+        u, err = None, e
     if u is None:
-        return ["      [사용량 조회 실패]"]
+        reason = _usage_failure(snap.credentials_blob, responses, err, now)
+        return [f"      [사용량 조회 실패: {reason}]"]
 
     def row(label, pct, resets_at):
         p_ = "?" if pct is None else f"{pct:.0f}%"
@@ -69,6 +98,8 @@ def _usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
 def _cmd_list(_args) -> int:
     ctx = _Ctx()
     ctx.switcher.reconcile()
+    # 활성 계정 사본은 claude 가 토큰을 교체한 뒤 데몬의 5분 싱크 전까지 낡아 있다 — 조회 전에 맞춘다.
+    ctx.switcher.refresh_active_snapshot_if_stable()
     now = time.time()
     if not ctx.store.file.accounts:
         print("등록된 계정이 없습니다. `mobius capture <이름>`으로 등록하세요.")
@@ -144,6 +175,8 @@ def _cmd_remove(args) -> int:
 def _cmd_status(_args) -> int:
     ctx = _Ctx()
     ctx.switcher.reconcile()
+    # 활성 계정 사본은 claude 가 토큰을 교체한 뒤 데몬의 5분 싱크 전까지 낡아 있다 — 조회 전에 맞춘다.
+    ctx.switcher.refresh_active_snapshot_if_stable()
     now = time.time()
     active = ctx.store.file.active
     if active is None:
