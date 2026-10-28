@@ -17,12 +17,14 @@ class RateLimitInfo:
     recorded_at: float         # epoch 초
     # 모델 전용 한도(예: Fable 주간)인가 — 계정 자체(5시간/주간)는 여유가 있을 수 있다.
     model_scoped: bool = False
+    source: str = "claude"
 
     def to_dict(self) -> dict:
         return {
             "resetsAt": self.resets_at,
             "recordedAt": self.recorded_at,
             "modelScoped": self.model_scoped,
+            "source": self.source,
         }
 
     @staticmethod
@@ -31,6 +33,7 @@ class RateLimitInfo:
             resets_at=float(d["resetsAt"]),
             recorded_at=float(d["recordedAt"]),
             model_scoped=bool(d.get("modelScoped", False)),
+            source=str(d.get("source", "claude")),
         )
 
 
@@ -78,6 +81,7 @@ class AccountProfile:
     tier_description: str = ""
     needs_reauth: bool = False
     rate_limit: Optional[RateLimitInfo] = None
+    codex_rate_limit: Optional[RateLimitInfo] = None
     has_desktop_snapshot: bool = False
     # 사용자가 이 계정을 직접(수동) 골랐는가. true면 모델 전용 한도(Fable 등)로는 밀어내지 않는다.
     user_pinned: bool = False
@@ -86,6 +90,10 @@ class AccountProfile:
     pinned_at: Optional[float] = None
     # 임계값 선제 경고(소진 아님). **엔진의 advisory 경로만** 읽는다 — 아래 주석 참조.
     advisory: Optional[AdvisoryRecord] = None
+    # Codex 자격이 연결된 경우의 내부 식별자. 화면에서 provider를 나누는 데 쓰지 않는다.
+    codex_account_id: Optional[str] = None
+    codex_plan_type: str = ""
+    has_claude_credentials: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -96,15 +104,20 @@ class AccountProfile:
             "tierDescription": self.tier_description,
             "needsReauth": self.needs_reauth,
             "rateLimit": self.rate_limit.to_dict() if self.rate_limit else None,
+            "codexRateLimit": self.codex_rate_limit.to_dict() if self.codex_rate_limit else None,
             "hasDesktopSnapshot": self.has_desktop_snapshot,
             "userPinned": self.user_pinned,
             "pinnedAt": self.pinned_at,
             "advisory": self.advisory.to_dict() if self.advisory else None,
+            "codexAccountID": self.codex_account_id,
+            "codexPlanType": self.codex_plan_type,
+            "hasClaudeCredentials": self.has_claude_credentials,
         }
 
     @staticmethod
     def from_dict(d: dict) -> "AccountProfile":
         rl = d.get("rateLimit")
+        codex_rl = d.get("codexRateLimit")
         ad = d.get("advisory")
         pinned_at = d.get("pinnedAt")
         return AccountProfile(
@@ -115,10 +128,14 @@ class AccountProfile:
             tier_description=str(d.get("tierDescription", "")),
             needs_reauth=bool(d.get("needsReauth", False)),
             rate_limit=RateLimitInfo.from_dict(rl) if rl else None,
+            codex_rate_limit=RateLimitInfo.from_dict(codex_rl) if codex_rl else None,
             has_desktop_snapshot=bool(d.get("hasDesktopSnapshot", False)),
             user_pinned=bool(d.get("userPinned", False)),
             pinned_at=float(pinned_at) if isinstance(pinned_at, (int, float)) else None,
             advisory=AdvisoryRecord.from_dict(ad) if ad else None,
+            codex_account_id=(str(d["codexAccountID"]) if d.get("codexAccountID") else None),
+            codex_plan_type=str(d.get("codexPlanType", "")),
+            has_claude_credentials=bool(d.get("hasClaudeCredentials", True)),
         )
 
     def is_limited(self, now: float) -> bool:
@@ -159,6 +176,7 @@ class AccountsFile:
     desktop_auto_switch_enabled: bool = False
     # 현재 fallback 활성이 "자동 전환"의 결과인가. onTick의 primary 자동 복귀는 이게 true일 때만.
     auto_switched_from_primary: bool = False
+    auto_switched_source: Optional[str] = None
     # 한도 차기 전 미리 전환 — 기본 꺼짐. 켜면 5분마다 활성 계정 사용량을 조회한다(네트워크).
     advisory_enabled: bool = False
     advisory_threshold: float = 90.0    # 50~95
@@ -171,6 +189,7 @@ class AccountsFile:
             "desktopSyncEnabled": self.desktop_sync_enabled,
             "desktopAutoSwitchEnabled": self.desktop_auto_switch_enabled,
             "autoSwitchedFromPrimary": self.auto_switched_from_primary,
+            "autoSwitchedSource": self.auto_switched_source,
             "advisoryEnabled": self.advisory_enabled,
             "advisoryThreshold": self.advisory_threshold,
         }
@@ -184,6 +203,8 @@ class AccountsFile:
             desktop_sync_enabled=bool(d.get("desktopSyncEnabled", True)),
             desktop_auto_switch_enabled=bool(d.get("desktopAutoSwitchEnabled", False)),
             auto_switched_from_primary=bool(d.get("autoSwitchedFromPrimary", False)),
+            auto_switched_source=(str(d["autoSwitchedSource"])
+                                  if d.get("autoSwitchedSource") else None),
             advisory_enabled=bool(d.get("advisoryEnabled", False)),
             advisory_threshold=float(d.get("advisoryThreshold", 90.0)),
         )
@@ -222,6 +243,48 @@ class CredentialsSnapshot:
             credentials_blob=d["credentialsText"].encode("utf-8"),
             oauth_account=d.get("oauthAccount"),
         )
+
+
+@dataclass
+class CodexCredentialsSnapshot:
+    """Codex CLI auth.json의 byte-동일 스냅샷."""
+
+    auth_blob: bytes
+    account_id: str
+    plan_type: str = ""
+
+
+@dataclass
+class AccountSecrets:
+    """한 계정에 연결된 Claude/Codex 자격증명 묶음.
+
+    기존 파일의 credentialsText/oauthAccount를 그대로 지원해 무손실 호환한다.
+    """
+
+    claude: Optional[CredentialsSnapshot] = None
+    codex: Optional[CodexCredentialsSnapshot] = None
+
+    def to_dict(self) -> dict:
+        out = self.claude.to_dict() if self.claude else {}
+        if self.codex:
+            out.update({
+                "codexAuthText": self.codex.auth_blob.decode("utf-8"),
+                "codexAccountID": self.codex.account_id,
+                "codexPlanType": self.codex.plan_type,
+            })
+        return out
+
+    @staticmethod
+    def from_dict(d: dict) -> "AccountSecrets":
+        claude = CredentialsSnapshot.from_dict(d) if "credentialsText" in d else None
+        codex = None
+        if isinstance(d.get("codexAuthText"), str) and isinstance(d.get("codexAccountID"), str):
+            codex = CodexCredentialsSnapshot(
+                auth_blob=d["codexAuthText"].encode("utf-8"),
+                account_id=d["codexAccountID"],
+                plan_type=str(d.get("codexPlanType", "")),
+            )
+        return AccountSecrets(claude=claude, codex=codex)
 
 
 @dataclass

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mobius-py"
 version = "0.1.0"
-description = "Claude Code 계정 전환/자동 fallback CLI (Linux) — macOS Mobius의 Python 포팅"
+description = "Claude Code와 Codex 통합 계정 전환/자동 fallback CLI (Linux)"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Ph4nt0m" }]

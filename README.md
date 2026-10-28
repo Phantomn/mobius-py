@@ -46,7 +46,7 @@ pip install --user -e mobius-py
 ## 사용법
 
 ```bash
-mobius capture <이름>     # 현재 claude 로그인 계정을 프로필로 저장 (여러 계정을 각각 로그인→capture)
+mobius capture <이름>     # 현재 Claude/Codex 로그인 자격을 하나의 계정 프로필로 저장
 mobius list              # 등록된 계정 목록 (● = 현재 활성)
 mobius switch <이름>      # 해당 계정으로 전환
 mobius remove <이름>      # 안 쓰는 계정 삭제 (활성 계정은 거부 — 먼저 switch)
@@ -60,9 +60,13 @@ mobius auto --install-service   # systemd user unit 생성
 
 ### 계정 등록 절차
 
-1. `claude` 에서 계정 A로 로그인 → `mobius capture 회사계정`
-2. `claude` 에서 계정 B로 로그인 → `mobius capture 개인계정`
-3. `mobius list` 로 확인. `accounts[0]` 이 primary(주 계정)다.
+1. Claude 또는 Codex에서 계정 A로 로그인 → `mobius capture 회사계정`
+2. 다른 계정으로 로그인 → `mobius capture 개인계정`
+3. `mobius list` 로 확인. 모든 계정은 하나의 primary/fallback 순서를 공유한다.
+
+Claude와 Codex 자격이 같은 계정에 로그인되어 있을 때 같은 이름으로 다시 `capture`하면
+하나의 프로필에 두 자격이 병합된다. `mobius switch <이름>`은 해당 프로필에 저장된 자격을
+교체하며, Codex 플러그인은 다음 작업부터 교체된 `~/.codex/auth.json`을 사용한다.
 
 ### 자동 전환 상시 구동 (systemd)
 
@@ -108,9 +112,10 @@ mobius advisory off
 
 ### Codex 사용량 조회
 
-`mobius list`와 `mobius status`는 Codex CLI가 저장한 `~/.codex/auth.json`의 현재 ChatGPT
-계정 사용량도 함께 표시한다. OAuth 토큰은 Mobius의 `accounts.json`에 복사하거나 출력하지
-않는다. Codex 계정 전환이나 Claude의 자동 fallback 정책에는 관여하지 않는다.
+`mobius list`와 `mobius status`는 통합 계정 목록에서 Claude와 Codex 사용량을 해당 계정 아래에
+표시한다. OAuth 토큰은 `accounts.json`에 저장하지 않고 0600 비밀 스냅샷으로만 보관한다.
+자동 fallback은 Claude 세션과 Codex 플러그인의 사용량 신호를 각각 관찰하되 같은 계정 순서를
+사용한다.
 
 ## 개발/테스트
 
@@ -134,6 +139,8 @@ mobius/
   autoswitch.py       자동 전환 상태머신
   token_refresher.py  OAuth refresh (폴백 생사 판정)
   usage.py            usage 엔드포인트 조회
+  codex_config.py     Codex auth.json 읽기/쓰기
+  codex_usage.py      Codex 사용량 창 조회
   fallback_check.py   폴백 계정 생사 검증
   daemon.py           자동 전환 틱 루프
   cli.py              CLI 진입점

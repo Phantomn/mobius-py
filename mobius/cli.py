@@ -97,21 +97,22 @@ def _usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
             row("7일", u.seven_day_percent, u.seven_day_resets_at)]
 
 
-def _codex_usage_lines(env: MobiusEnvironment, now: float) -> list[str]:
-    """현재 Codex 계정 사용량을 기존 계정 화면에 붙인다."""
+def _codex_snapshot_lines(ctx, p: AccountProfile, now: float) -> list[str]:
+    stored = ctx.store.codex_secret(p.id)
+    if stored is None:
+        return []
     try:
-        auth = CodexConfigIO(env.home).read_auth()
+        auth = CodexConfigIO.parse_auth(stored.auth_blob)
         snapshot = codex_usage.fetch(auth, now)
     except CodexAuthError:
-        return []
+        return ["      [사용량 조회 실패: Codex 인증 형식 오류]"]
     except codex_usage.Unauthorized:
-        return ["Codex  사용량 조회 실패: 토큰 거부(재로그인 필요)"]
+        return ["      [사용량 조회 실패: Codex 토큰 거부(재로그인 필요)]"]
     except OSError as exc:
-        return [f"Codex  사용량 조회 실패: 네트워크 오류 — {exc}"]
+        return [f"      [사용량 조회 실패: 네트워크 오류 — {exc}]"]
     if snapshot is None:
-        return ["Codex  사용량 조회 실패: 응답 해석 실패"]
-    plan = f" ({snapshot.plan_type})" if snapshot.plan_type else ""
-    lines = [f"Codex 계정{plan} <...{auth.account_id[-8:]}>"]
+        return ["      [사용량 조회 실패: Codex 응답 해석 실패]"]
+    lines = []
     for window in snapshot.windows:
         name = {"primary": "주요 한도", "secondary": "보조 한도"}.get(window.name, window.name)
         if window.window_minutes is None:
@@ -126,16 +127,19 @@ def _codex_usage_lines(env: MobiusEnvironment, now: float) -> list[str]:
     return lines
 
 
+def _account_usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
+    return _usage_lines(ctx, p, now) + _codex_snapshot_lines(ctx, p, now)
+
+
 def _cmd_list(_args) -> int:
     ctx = _Ctx()
+    ctx.switcher.adopt_codex_account_if_unregistered()
     ctx.switcher.reconcile()
     # 활성 계정 사본은 claude 가 토큰을 교체한 뒤 데몬의 5분 싱크 전까지 낡아 있다 — 조회 전에 맞춘다.
     ctx.switcher.refresh_active_snapshot_if_stable()
     now = time.time()
     if not ctx.store.file.accounts:
         print("등록된 계정이 없습니다. `mobius capture <이름>`으로 등록하세요.")
-        for line in _codex_usage_lines(ctx.env, now):
-            print(line)
         return 0
     active_id = ctx.store.file.active_account_id
     for i, p in enumerate(ctx.store.file.accounts):
@@ -144,10 +148,8 @@ def _cmd_list(_args) -> int:
         reauth = "  [재로그인 필요]" if p.needs_reauth else ""
         print(f"{active} {role}  {p.nickname}  <{p.email_address}>  "
               f"{p.tier_description}{_fmt_reset(p, now)}{reauth}")
-        for line in _usage_lines(ctx, p, now):
+        for line in _account_usage_lines(ctx, p, now):
             print(line)
-    for line in _codex_usage_lines(ctx.env, now):
-        print(line)
     return 0
 
 
@@ -168,7 +170,7 @@ def _cmd_switch(args) -> int:
     ctx.store.set_user_pinned(target.id, time.time())
     ctx.store.set_auto_switched_from_primary(False)
     print(f"전환 완료 → {target.nickname} <{target.email_address}>")
-    print("실행 중인 claude 세션엔 즉시 적용되지 않을 수 있습니다 — 그 경우 세션을 새로 시작하세요.")
+    print("실행 중인 세션에는 즉시 적용되지 않을 수 있습니다 — 새 세션이나 새 Codex 작업부터 적용하세요.")
     return 0
 
 
@@ -209,6 +211,7 @@ def _cmd_remove(args) -> int:
 
 def _cmd_status(_args) -> int:
     ctx = _Ctx()
+    ctx.switcher.adopt_codex_account_if_unregistered()
     ctx.switcher.reconcile()
     # 활성 계정 사본은 claude 가 토큰을 교체한 뒤 데몬의 5분 싱크 전까지 낡아 있다 — 조회 전에 맞춘다.
     ctx.switcher.refresh_active_snapshot_if_stable()
@@ -216,15 +219,11 @@ def _cmd_status(_args) -> int:
     active = ctx.store.file.active
     if active is None:
         print("활성 계정 없음 (claude 로그아웃 상태이거나 미등록 계정)")
-        for line in _codex_usage_lines(ctx.env, now):
-            print(line)
         return 0
     primary = ctx.store.file.primary
     role = "primary" if primary and active.id == primary.id else "fallback"
     print(f"활성: {active.nickname} <{active.email_address}> ({role}){_fmt_reset(active, now)}")
-    for line in _usage_lines(ctx, active, now):
-        print(line)
-    for line in _codex_usage_lines(ctx.env, now):
+    for line in _account_usage_lines(ctx, active, now):
         print(line)
     print(f"자동 전환: {'켜짐' if ctx.store.file.auto_switch_enabled else '꺼짐'}")
     f = ctx.store.file
@@ -263,17 +262,31 @@ def _cmd_advisory(args) -> int:
 
 def _cmd_capture(args) -> int:
     ctx = _Ctx()
-    snap = ctx.io.read_live_snapshot()
-    if snap is None:
-        print("claude 로그인 상태가 아닙니다. 먼저 `claude`에서 /login 하세요.", file=sys.stderr)
+    claude_snap = ctx.io.read_live_snapshot()
+    codex_snap = None
+    try:
+        codex_snap = ctx.switcher.codex_io.read_snapshot()
+    except CodexAuthError:
+        pass
+    if claude_snap is None and codex_snap is None:
+        print("Claude 또는 Codex 로그인 상태가 아닙니다.", file=sys.stderr)
         return 1
     try:
-        p = ctx.store.upsert_profile(args.name, snap)
+        p = ctx.store.upsert_profile(args.name, claude_snap) if claude_snap else None
+        if codex_snap is not None:
+            p = ctx.store.upsert_codex_profile(args.name, codex_snap)
+        if p is None:
+            raise RuntimeError("계정을 만들지 못했습니다")
     except Exception as e:
         print(f"캡처 실패: {e}", file=sys.stderr)
         return 1
     ctx.store.set_active(p.id)
-    print(f"캡처 완료: {p.nickname} <{p.email_address}> {p.tier_description}")
+    attached = []
+    if claude_snap is not None:
+        attached.append("Claude")
+    if codex_snap is not None:
+        attached.append("Codex")
+    print(f"캡처 완료: {p.nickname} <{p.email_address}> ({', '.join(attached)})")
     return 0
 
 

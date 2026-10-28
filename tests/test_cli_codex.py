@@ -2,6 +2,7 @@ import json
 
 from mobius import cli
 from mobius.codex_usage import CodexUsageSnapshot, UsageWindow
+from mobius.store import AccountStore
 
 
 def _write_auth(env):
@@ -12,19 +13,32 @@ def _write_auth(env):
 
 def test_list_includes_codex_usage(env, monkeypatch, capsys):
     _write_auth(env)
+    assert cli.main(["capture", "codex-account"]) == 0
     monkeypatch.setattr(cli.codex_usage, "fetch", lambda auth, now: CodexUsageSnapshot(
         "pro", (UsageWindow("primary", 42, now + 3600, 300),), now))
 
     assert cli.main(["list"]) == 0
     out = capsys.readouterr().out
-    assert "Codex 계정 (pro) <...12345678>" in out
+    assert "primary   codex-account  <account-12345678>" in out
     assert "주요 한도" in out and "5시간 창" in out and "42%" in out
 
 
 def test_status_includes_codex_usage(env, monkeypatch, capsys):
     _write_auth(env)
+    assert cli.main(["capture", "codex-account"]) == 0
     monkeypatch.setattr(cli.codex_usage, "fetch", lambda auth, now: CodexUsageSnapshot(
         "plus", (UsageWindow("secondary", 8, now + 3600, 10080),), now))
 
     assert cli.main(["status"]) == 0
-    assert "Codex 계정 (plus)" in capsys.readouterr().out
+    assert "보조 한도" in capsys.readouterr().out
+
+
+def test_capture_registers_codex_in_shared_account_pool(env, capsys):
+    _write_auth(env)
+
+    assert cli.main(["capture", "codex-account"]) == 0
+    store = AccountStore(env)
+    profile = store.file.accounts[0]
+    assert profile.nickname == "codex-account"
+    assert store.codex_secret(profile.id).account_id == "account-12345678"
+    assert "캡처 완료" in capsys.readouterr().out
