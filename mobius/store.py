@@ -107,6 +107,35 @@ class AccountStore:
         self.save()
         return profile
 
+    def upsert_codex_profile(self, nickname: str,
+                             snapshot: CodexCredentialsSnapshot) -> AccountProfile:
+        """Codex 자격을 기존 닉네임 계정에 병합하거나 통합 계정을 만든다."""
+        existing = next((a for a in self.file.accounts
+                         if a.codex_account_id == snapshot.account_id
+                         or (a.nickname == nickname and a.codex_account_id is None)), None)
+        if existing is not None:
+            profile = existing
+        else:
+            profile = AccountProfile(
+                id=new_account_id(), nickname=nickname,
+                email_address=snapshot.account_id,
+                tier_description=snapshot.plan_type,
+                codex_account_id=snapshot.account_id,
+                codex_plan_type=snapshot.plan_type,
+                has_claude_credentials=False,
+            )
+            self.file.accounts.append(profile)
+            if self.file.active_account_id is None:
+                self.file.active_account_id = profile.id
+        profile.codex_account_id = snapshot.account_id
+        if snapshot.plan_type:
+            profile.codex_plan_type = snapshot.plan_type
+            if not profile.tier_description:
+                profile.tier_description = snapshot.plan_type
+        self.set_codex_secret(snapshot, profile.id)
+        self.save()
+        return profile
+
     # ---------- 비밀 스냅샷 (0600 파일) ----------
 
     def secret(self, account_id: str) -> Optional[CredentialsSnapshot]:

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .claude_config import ClaudeConfigIO
+from .codex_config import CodexConfigIO
 from .models import AccountProfile
 from .store import AccountStore, UnknownAccount
 
@@ -18,9 +19,11 @@ class NoStoredSecret(Exception):
 
 
 class Switcher:
-    def __init__(self, store: AccountStore, io: ClaudeConfigIO):
+    def __init__(self, store: AccountStore, io: ClaudeConfigIO,
+                 codex_io: Optional[CodexConfigIO] = None):
         self.store = store
         self.io = io
+        self.codex_io = codex_io or CodexConfigIO(store.env.home)
 
     def resave_live_into_matching_profile(self) -> Optional[str]:
         """현재 라이브 상태를, email이 일치하는 프로필에 되저장한다. 반환: 프로필 id."""
@@ -65,21 +68,35 @@ class Switcher:
     def switch_to(self, account_id: str) -> None:
         if not any(a.id == account_id for a in self.store.file.accounts):
             raise UnknownAccount()
-        target = self.store.secret(account_id)
-        if target is None:
+        claude_target = self.store.secret(account_id)
+        codex_target = self.store.codex_secret(account_id)
+        if claude_target is None and codex_target is None:
             raise NoStoredSecret()
 
         # 1. 라이브 최신 토큰 되저장 (CLI가 refresh했을 수 있으므로)
-        before = self.io.read_live_snapshot()
+        before_claude = self.io.read_live_snapshot()
+        before_codex = None
+        try:
+            before_codex = self.codex_io.read_auth()
+        except Exception:
+            pass
         self.resave_live_into_matching_profile()
 
         # 2. 대상 기록, 실패 시 롤백
         try:
-            self.io.write_live_snapshot(target)
+            if claude_target is not None:
+                self.io.write_live_snapshot(claude_target)
+            if codex_target is not None:
+                self.codex_io.write_auth(codex_target.auth_blob)
         except Exception:
-            if before is not None:
+            if before_claude is not None:
                 try:
-                    self.io.write_live_snapshot(before)
+                    self.io.write_live_snapshot(before_claude)
+                except Exception:
+                    pass
+            if before_codex is not None:
+                try:
+                    self.codex_io.write_auth(before_codex.raw_blob)
                 except Exception:
                     pass
             raise
@@ -103,6 +120,11 @@ class Switcher:
 
     def reconcile(self) -> None:
         """외부 재로그인 감지 시 상태 대사: 라이브 email이 아는 프로필이면 활성 표시+토큰 흡수."""
+        active = self.store.file.active
+        # Codex-only 계정이 활성인 동안 Claude의 이전 라이브 자격을 보고 active를 되돌리면
+        # 통합 계정 풀의 switch 결과가 매 list/status 호출마다 사라진다.
+        if active is not None and self.store.secret(active.id) is None:
+            return
         email = self.io.live_email()
         if email is None:
             return

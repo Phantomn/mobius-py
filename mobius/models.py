@@ -89,6 +89,7 @@ class AccountProfile:
     # Codex 자격이 연결된 경우의 내부 식별자. 화면에서 provider를 나누는 데 쓰지 않는다.
     codex_account_id: Optional[str] = None
     codex_plan_type: str = ""
+    has_claude_credentials: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -105,6 +106,7 @@ class AccountProfile:
             "advisory": self.advisory.to_dict() if self.advisory else None,
             "codexAccountID": self.codex_account_id,
             "codexPlanType": self.codex_plan_type,
+            "hasClaudeCredentials": self.has_claude_credentials,
         }
 
     @staticmethod
@@ -126,6 +128,7 @@ class AccountProfile:
             advisory=AdvisoryRecord.from_dict(ad) if ad else None,
             codex_account_id=(str(d["codexAccountID"]) if d.get("codexAccountID") else None),
             codex_plan_type=str(d.get("codexPlanType", "")),
+            has_claude_credentials=bool(d.get("hasClaudeCredentials", True)),
         )
 
     def is_limited(self, now: float) -> bool:

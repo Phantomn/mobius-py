@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from .models import CodexCredentialsSnapshot
+
 
 @dataclass(frozen=True)
 class CodexAuth:
@@ -33,8 +35,15 @@ class CodexConfigIO:
     def read_auth(self) -> CodexAuth:
         try:
             data = self.auth_file.read_bytes()
-            obj = json.loads(data)
         except (OSError, ValueError) as exc:
+            raise CodexAuthError("Codex 로그인 상태를 읽을 수 없습니다") from exc
+        return self.parse_auth(data)
+
+    @staticmethod
+    def parse_auth(data: bytes) -> CodexAuth:
+        try:
+            obj = json.loads(data)
+        except ValueError as exc:
             raise CodexAuthError("Codex 로그인 상태를 읽을 수 없습니다") from exc
         tokens = obj.get("tokens") if isinstance(obj, dict) else None
         access_token = tokens.get("access_token") if isinstance(tokens, dict) else None
@@ -49,3 +58,7 @@ class CodexConfigIO:
         self.auth_file.parent.mkdir(parents=True, exist_ok=True)
         from .fsutil import write_atomic
         write_atomic(raw_blob, self.auth_file, 0o600)
+
+    def read_snapshot(self) -> CodexCredentialsSnapshot:
+        auth = self.read_auth()
+        return CodexCredentialsSnapshot(auth.raw_blob, auth.account_id)

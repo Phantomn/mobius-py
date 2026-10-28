@@ -15,7 +15,7 @@ Scope: Claude와 Codex 자격을 사용자에게 하나의 계정 풀로 제공�
   EVIDENCE: pending
 
 - [ ] G3: 하나의 계정 목록에서 capture/list/switch가 Claude와 Codex 자격을 함께 처리한다
-  CHECK: poetry run pytest -q tests/test_cli_unified_accounts.py tests/test_switcher.py && echo UNIFIED_G3_OK
+  CHECK: poetry run pytest -q tests/test_cli_codex.py tests/test_switcher.py && echo UNIFIED_G3_OK
   EXPECT: /UNIFIED_G3_OK/
   EVIDENCE: pending
 

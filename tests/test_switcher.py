@@ -3,7 +3,8 @@ import json
 import pytest
 
 from mobius.claude_config import ClaudeConfigIO
-from mobius.models import CredentialsSnapshot
+from mobius.codex_config import CodexConfigIO
+from mobius.models import CodexCredentialsSnapshot, CredentialsSnapshot
 from mobius.store import AccountStore
 from mobius.switcher import Switcher
 from tests.conftest import creds_blob, write_live
@@ -89,3 +90,38 @@ def test_adopt_unregistered(env):
     p = sw.adopt_live_account_if_unregistered()
     assert p is not None and p.nickname == "solo"
     assert store.file.active_account_id == p.id
+
+
+def test_switch_changes_codex_auth_for_unified_account(env):
+    write_live(env, tag="A", email="a@example.com")
+    store = AccountStore(env)
+    io = ClaudeConfigIO(env)
+    codex_io = CodexConfigIO(env.home)
+    a = store.upsert_profile("claude", io.read_live_snapshot())
+    b = store.upsert_codex_profile("codex", CodexCredentialsSnapshot(
+        b'{"tokens":{"access_token":"at-b","account_id":"acct-b"}}', "acct-b", "pro"))
+    codex_io.write_auth(b'{"tokens":{"access_token":"at-a","account_id":"acct-a"}}')
+    sw = Switcher(store, io, codex_io)
+
+    sw.switch_to(b.id)
+
+    assert codex_io.read_auth().account_id == "acct-b"
+    assert store.file.active_account_id == b.id
+    assert json.loads(env.credentials_file.read_bytes())["claudeAiOauth"]["accessToken"] == "at-A"
+
+
+def test_reconcile_does_not_undo_codex_only_active_account(env):
+    write_live(env, tag="A", email="a@example.com")
+    store = AccountStore(env)
+    io = ClaudeConfigIO(env)
+    codex_io = CodexConfigIO(env.home)
+    store.upsert_profile("claude", io.read_live_snapshot())
+    codex = store.upsert_codex_profile("codex", CodexCredentialsSnapshot(
+        b'{"tokens":{"access_token":"at-b","account_id":"acct-b"}}', "acct-b", "pro"))
+    codex_io.write_auth(b'{"tokens":{"access_token":"at-a","account_id":"acct-a"}}')
+    sw = Switcher(store, io, codex_io)
+    sw.switch_to(codex.id)
+
+    sw.reconcile()
+
+    assert store.file.active_account_id == codex.id

@@ -41,3 +41,22 @@ def test_codex_auth_snapshot_can_be_written_atomically(env):
     io = CodexConfigIO(env.home)
     io.write_auth(raw)
     assert io.read_auth().raw_blob == raw
+
+
+def test_codex_capture_merges_into_existing_nickname(env):
+    store = AccountStore(env)
+    claude = store.upsert_profile("same-account", _claude())
+    codex = CodexCredentialsSnapshot(b'{"tokens":{}}', "acct-merge", "pro")
+
+    merged = store.upsert_codex_profile("same-account", codex)
+
+    assert merged.id == claude.id
+    assert len(store.file.accounts) == 1
+    assert store.codex_secret(merged.id).account_id == "acct-merge"
+
+
+def test_codex_only_account_is_not_a_claude_fallback(env):
+    store = AccountStore(env)
+    profile = store.upsert_codex_profile(
+        "codex-only", CodexCredentialsSnapshot(b'{"tokens":{}}', "acct-only", "pro"))
+    assert profile.has_claude_credentials is False
