@@ -125,3 +125,16 @@ def test_reconcile_does_not_undo_codex_only_active_account(env):
     sw.reconcile()
 
     assert store.file.active_account_id == codex.id
+
+
+def test_adopt_unregistered_codex_account(env):
+    CodexConfigIO(env.home).write_auth(
+        b'{"tokens":{"access_token":"at","account_id":"acct-new"}}')
+    store = AccountStore(env)
+    sw = Switcher(store, ClaudeConfigIO(env), CodexConfigIO(env.home))
+
+    profile = sw.adopt_codex_account_if_unregistered()
+
+    assert profile is not None
+    assert profile.nickname == "account-acct-new"
+    assert store.codex_secret(profile.id).account_id == "acct-new"

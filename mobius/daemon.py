@@ -154,6 +154,7 @@ class Daemon:
             self._last_reconcile = now
             try:
                 self.switcher.adopt_live_account_if_unregistered()
+                self.switcher.adopt_codex_account_if_unregistered()
                 self.switcher.reconcile()
             except Exception:
                 pass

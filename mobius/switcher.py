@@ -118,6 +118,24 @@ class Switcher:
         self.store.set_active(profile.id)
         return profile
 
+    def adopt_codex_account_if_unregistered(self) -> Optional[AccountProfile]:
+        """현재 Codex 인증을 계정 풀에 자동 채택한다."""
+        try:
+            live = self.codex_io.read_snapshot()
+        except Exception:
+            return None
+        existing = next((a for a in self.store.file.accounts
+                         if a.codex_account_id == live.account_id), None)
+        if existing is not None:
+            if self.store.codex_secret(existing.id) is None:
+                self.store.set_codex_secret(live, existing.id)
+            return None
+        nickname = f"account-{live.account_id[-8:]}"
+        profile = self.store.upsert_codex_profile(nickname, live)
+        if self.store.file.active_account_id is None:
+            self.store.set_active(profile.id)
+        return profile
+
     def reconcile(self) -> None:
         """외부 재로그인 감지 시 상태 대사: 라이브 email이 아는 프로필이면 활성 표시+토큰 흡수."""
         active = self.store.file.active

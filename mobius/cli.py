@@ -133,6 +133,7 @@ def _account_usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
 
 def _cmd_list(_args) -> int:
     ctx = _Ctx()
+    ctx.switcher.adopt_codex_account_if_unregistered()
     ctx.switcher.reconcile()
     # 활성 계정 사본은 claude 가 토큰을 교체한 뒤 데몬의 5분 싱크 전까지 낡아 있다 — 조회 전에 맞춘다.
     ctx.switcher.refresh_active_snapshot_if_stable()
@@ -210,6 +211,7 @@ def _cmd_remove(args) -> int:
 
 def _cmd_status(_args) -> int:
     ctx = _Ctx()
+    ctx.switcher.adopt_codex_account_if_unregistered()
     ctx.switcher.reconcile()
     # 활성 계정 사본은 claude 가 토큰을 교체한 뒤 데몬의 5분 싱크 전까지 낡아 있다 — 조회 전에 맞춘다.
     ctx.switcher.refresh_active_snapshot_if_stable()
