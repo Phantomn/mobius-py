@@ -106,6 +106,12 @@ mobius advisory off
   손상 시 `accounts.corrupt.json` 으로 백업한 뒤 중단한다(데이터 유실 방지).
 - **실행 중 claude 세션**에는 전환이 즉시 반영되지 않을 수 있다 — 새 세션부터 적용된다.
 
+### Codex 사용량 조회
+
+`mobius list`와 `mobius status`는 Codex CLI가 저장한 `~/.codex/auth.json`의 현재 ChatGPT
+계정 사용량도 함께 표시한다. OAuth 토큰은 Mobius의 `accounts.json`에 복사하거나 출력하지
+않는다. Codex 계정 전환이나 Claude의 자동 fallback 정책에는 관여하지 않는다.
+
 ## 개발/테스트
 
 ```bash

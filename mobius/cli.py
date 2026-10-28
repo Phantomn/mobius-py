@@ -16,6 +16,8 @@ from typing import Optional
 
 from . import credentials, usage
 from .claude_config import ClaudeConfigIO
+from .codex_config import CodexAuthError, CodexConfigIO
+from . import codex_usage
 from .env import MobiusEnvironment
 from .models import AccountProfile
 from .store import AccountStore
@@ -95,6 +97,35 @@ def _usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
             row("7일", u.seven_day_percent, u.seven_day_resets_at)]
 
 
+def _codex_usage_lines(env: MobiusEnvironment, now: float) -> list[str]:
+    """현재 Codex 계정 사용량을 기존 계정 화면에 붙인다."""
+    try:
+        auth = CodexConfigIO(env.home).read_auth()
+        snapshot = codex_usage.fetch(auth, now)
+    except CodexAuthError:
+        return []
+    except codex_usage.Unauthorized:
+        return ["Codex  사용량 조회 실패: 토큰 거부(재로그인 필요)"]
+    except OSError as exc:
+        return [f"Codex  사용량 조회 실패: 네트워크 오류 — {exc}"]
+    if snapshot is None:
+        return ["Codex  사용량 조회 실패: 응답 해석 실패"]
+    plan = f" ({snapshot.plan_type})" if snapshot.plan_type else ""
+    lines = [f"Codex 계정{plan} <...{auth.account_id[-8:]}>"]
+    for window in snapshot.windows:
+        name = {"primary": "주요 한도", "secondary": "보조 한도"}.get(window.name, window.name)
+        if window.window_minutes is None:
+            span = "창 길이 미상"
+        elif window.window_minutes % (24 * 60) == 0:
+            span = f"{window.window_minutes // (24 * 60)}일 창"
+        elif window.window_minutes % 60 == 0:
+            span = f"{window.window_minutes // 60}시간 창"
+        else:
+            span = f"{window.window_minutes}분 창"
+        lines.append(f"      {name:<8}{window.used_percent:>4.0f}%  ({span})  리셋 {_fmt_in(window.resets_at, now)}")
+    return lines
+
+
 def _cmd_list(_args) -> int:
     ctx = _Ctx()
     ctx.switcher.reconcile()
@@ -103,6 +134,8 @@ def _cmd_list(_args) -> int:
     now = time.time()
     if not ctx.store.file.accounts:
         print("등록된 계정이 없습니다. `mobius capture <이름>`으로 등록하세요.")
+        for line in _codex_usage_lines(ctx.env, now):
+            print(line)
         return 0
     active_id = ctx.store.file.active_account_id
     for i, p in enumerate(ctx.store.file.accounts):
@@ -113,6 +146,8 @@ def _cmd_list(_args) -> int:
               f"{p.tier_description}{_fmt_reset(p, now)}{reauth}")
         for line in _usage_lines(ctx, p, now):
             print(line)
+    for line in _codex_usage_lines(ctx.env, now):
+        print(line)
     return 0
 
 
@@ -181,11 +216,15 @@ def _cmd_status(_args) -> int:
     active = ctx.store.file.active
     if active is None:
         print("활성 계정 없음 (claude 로그아웃 상태이거나 미등록 계정)")
+        for line in _codex_usage_lines(ctx.env, now):
+            print(line)
         return 0
     primary = ctx.store.file.primary
     role = "primary" if primary and active.id == primary.id else "fallback"
     print(f"활성: {active.nickname} <{active.email_address}> ({role}){_fmt_reset(active, now)}")
     for line in _usage_lines(ctx, active, now):
+        print(line)
+    for line in _codex_usage_lines(ctx.env, now):
         print(line)
     print(f"자동 전환: {'켜짐' if ctx.store.file.auto_switch_enabled else '꺼짐'}")
     f = ctx.store.file
