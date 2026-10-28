@@ -15,6 +15,7 @@ from typing import Optional
 class CodexAuth:
     access_token: str
     account_id: str
+    raw_blob: bytes = b""
 
 
 class CodexAuthError(Exception):
@@ -31,7 +32,8 @@ class CodexConfigIO:
 
     def read_auth(self) -> CodexAuth:
         try:
-            obj = json.loads(self.auth_file.read_text(encoding="utf-8"))
+            data = self.auth_file.read_bytes()
+            obj = json.loads(data)
         except (OSError, ValueError) as exc:
             raise CodexAuthError("Codex 로그인 상태를 읽을 수 없습니다") from exc
         tokens = obj.get("tokens") if isinstance(obj, dict) else None
@@ -41,4 +43,9 @@ class CodexConfigIO:
             raise CodexAuthError("Codex access token이 없습니다")
         if not isinstance(account_id, str) or not account_id:
             raise CodexAuthError("Codex account id가 없습니다")
-        return CodexAuth(access_token=access_token, account_id=account_id)
+        return CodexAuth(access_token=access_token, account_id=account_id, raw_blob=data)
+
+    def write_auth(self, raw_blob: bytes) -> None:
+        self.auth_file.parent.mkdir(parents=True, exist_ok=True)
+        from .fsutil import write_atomic
+        write_atomic(raw_blob, self.auth_file, 0o600)

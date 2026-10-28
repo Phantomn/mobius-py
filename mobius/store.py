@@ -13,8 +13,8 @@ from typing import Callable, Optional
 from . import credentials
 from .env import MobiusEnvironment
 from .fsutil import write_atomic
-from .models import (AccountProfile, AccountsFile, AdvisoryRecord, CredentialsSnapshot,
-                     new_account_id)
+from .models import (AccountProfile, AccountSecrets, AccountsFile, AdvisoryRecord,
+                     CodexCredentialsSnapshot, CredentialsSnapshot, new_account_id)
 
 
 class AccountStoreError(Exception):
@@ -110,11 +110,19 @@ class AccountStore:
     # ---------- 비밀 스냅샷 (0600 파일) ----------
 
     def secret(self, account_id: str) -> Optional[CredentialsSnapshot]:
+        stored = self.secrets(account_id)
+        return stored.claude if stored else None
+
+    def secrets(self, account_id: str) -> Optional[AccountSecrets]:
         try:
             data = self.env.secret_file(account_id).read_bytes()
         except OSError:
             return None
-        return CredentialsSnapshot.from_dict(json.loads(data))
+        return AccountSecrets.from_dict(json.loads(data))
+
+    def codex_secret(self, account_id: str) -> Optional[CodexCredentialsSnapshot]:
+        stored = self.secrets(account_id)
+        return stored.codex if stored else None
 
     def set_secret(self, snapshot: CredentialsSnapshot, account_id: str) -> None:
         # needsReauth 는 "저장된 refresh 토큰이 폐기됨"이라는 **그 토큰에 대한** 판정이다.
@@ -133,12 +141,25 @@ class AccountStore:
             self.env.secrets_dir.chmod(0o700)
         except OSError:
             pass
-        data = json.dumps(snapshot.to_dict()).encode("utf-8")
+        stored = self.secrets(account_id) or AccountSecrets()
+        stored.claude = snapshot
+        data = json.dumps(stored.to_dict()).encode("utf-8")
         write_atomic(data, self.env.secret_file(account_id), 0o600)
 
         if flagged and credentials.refresh_token_rotated(
                 prev.credentials_blob if prev else None, snapshot.credentials_blob):
             self.set_needs_reauth(account_id, False)
+
+    def set_codex_secret(self, snapshot: CodexCredentialsSnapshot, account_id: str) -> None:
+        self.env.secrets_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.env.secrets_dir.chmod(0o700)
+        except OSError:
+            pass
+        stored = self.secrets(account_id) or AccountSecrets()
+        stored.codex = snapshot
+        data = json.dumps(stored.to_dict()).encode("utf-8")
+        write_atomic(data, self.env.secret_file(account_id), 0o600)
 
     # ---------- 상태 변경 ----------
 

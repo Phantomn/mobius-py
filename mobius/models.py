@@ -86,6 +86,9 @@ class AccountProfile:
     pinned_at: Optional[float] = None
     # 임계값 선제 경고(소진 아님). **엔진의 advisory 경로만** 읽는다 — 아래 주석 참조.
     advisory: Optional[AdvisoryRecord] = None
+    # Codex 자격이 연결된 경우의 내부 식별자. 화면에서 provider를 나누는 데 쓰지 않는다.
+    codex_account_id: Optional[str] = None
+    codex_plan_type: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -100,6 +103,8 @@ class AccountProfile:
             "userPinned": self.user_pinned,
             "pinnedAt": self.pinned_at,
             "advisory": self.advisory.to_dict() if self.advisory else None,
+            "codexAccountID": self.codex_account_id,
+            "codexPlanType": self.codex_plan_type,
         }
 
     @staticmethod
@@ -119,6 +124,8 @@ class AccountProfile:
             user_pinned=bool(d.get("userPinned", False)),
             pinned_at=float(pinned_at) if isinstance(pinned_at, (int, float)) else None,
             advisory=AdvisoryRecord.from_dict(ad) if ad else None,
+            codex_account_id=(str(d["codexAccountID"]) if d.get("codexAccountID") else None),
+            codex_plan_type=str(d.get("codexPlanType", "")),
         )
 
     def is_limited(self, now: float) -> bool:
@@ -222,6 +229,48 @@ class CredentialsSnapshot:
             credentials_blob=d["credentialsText"].encode("utf-8"),
             oauth_account=d.get("oauthAccount"),
         )
+
+
+@dataclass
+class CodexCredentialsSnapshot:
+    """Codex CLI auth.json의 byte-동일 스냅샷."""
+
+    auth_blob: bytes
+    account_id: str
+    plan_type: str = ""
+
+
+@dataclass
+class AccountSecrets:
+    """한 계정에 연결된 Claude/Codex 자격증명 묶음.
+
+    기존 파일의 credentialsText/oauthAccount를 그대로 지원해 무손실 호환한다.
+    """
+
+    claude: Optional[CredentialsSnapshot] = None
+    codex: Optional[CodexCredentialsSnapshot] = None
+
+    def to_dict(self) -> dict:
+        out = self.claude.to_dict() if self.claude else {}
+        if self.codex:
+            out.update({
+                "codexAuthText": self.codex.auth_blob.decode("utf-8"),
+                "codexAccountID": self.codex.account_id,
+                "codexPlanType": self.codex.plan_type,
+            })
+        return out
+
+    @staticmethod
+    def from_dict(d: dict) -> "AccountSecrets":
+        claude = CredentialsSnapshot.from_dict(d) if "credentialsText" in d else None
+        codex = None
+        if isinstance(d.get("codexAuthText"), str) and isinstance(d.get("codexAccountID"), str):
+            codex = CodexCredentialsSnapshot(
+                auth_blob=d["codexAuthText"].encode("utf-8"),
+                account_id=d["codexAccountID"],
+                plan_type=str(d.get("codexPlanType", "")),
+            )
+        return AccountSecrets(claude=claude, codex=codex)
 
 
 @dataclass
