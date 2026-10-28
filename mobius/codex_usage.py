@@ -23,10 +23,10 @@ class Unauthorized(Exception):
 
 @dataclass(frozen=True)
 class UsageWindow:
-    label: str
+    name: str
     used_percent: float
     resets_at: Optional[float]
-    window_seconds: Optional[int]
+    window_minutes: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,7 @@ class CodexUsageSnapshot:
     fetched_at: float
 
 
-def _window(label: str, value: object) -> Optional[UsageWindow]:
+def _window(name: str, value: object) -> Optional[UsageWindow]:
     if not isinstance(value, dict):
         return None
     used = value.get("used_percent")
@@ -51,10 +51,11 @@ def _window(label: str, value: object) -> Optional[UsageWindow]:
             reset = None
     if not isinstance(reset, (int, float)):
         reset = None
-    seconds = value.get("limit_window_seconds")
-    if not isinstance(seconds, int) or isinstance(seconds, bool):
-        seconds = None
-    return UsageWindow(label, float(used), float(reset) if reset is not None else None, seconds)
+    minutes = value.get("window_minutes")
+    if not isinstance(minutes, int) or isinstance(minutes, bool):
+        seconds = value.get("limit_window_seconds")
+        minutes = seconds // 60 if isinstance(seconds, int) and not isinstance(seconds, bool) else None
+    return UsageWindow(name, float(used), float(reset) if reset is not None else None, minutes)
 
 
 def parse(data: bytes, now: float) -> Optional[CodexUsageSnapshot]:
@@ -67,8 +68,8 @@ def parse(data: bytes, now: float) -> Optional[CodexUsageSnapshot]:
     limits = obj.get("rate_limit")
     if not isinstance(limits, dict):
         return None
-    windows = tuple(w for label, key in (("주요 창", "primary_window"), ("보조 창", "secondary_window"))
-                   if (w := _window(label, limits.get(key))) is not None)
+    windows = tuple(w for name, key in (("primary", "primary_window"), ("secondary", "secondary_window"))
+                   if (w := _window(name, limits.get(key))) is not None)
     if not windows:
         return None
     plan = obj.get("plan_type")

@@ -25,8 +25,16 @@ def test_parse_codex_rate_limit_windows():
     snap = parse(body(), NOW)
     assert snap is not None
     assert snap.plan_type == "pro"
-    assert [(w.label, w.used_percent, w.window_seconds) for w in snap.windows] == [
-        ("주요 창", 42.0, 18000), ("보조 창", 8.0, 604800)]
+    assert [(w.name, w.used_percent, w.window_minutes) for w in snap.windows] == [
+        ("primary", 42.0, 300), ("secondary", 8.0, 10080)]
+
+
+def test_parse_accepts_codex_window_minutes():
+    data = json.dumps({"rate_limit": {"primary_window": {
+        "used_percent": 3, "window_minutes": 300,
+    }}}).encode()
+    snap = parse(data, NOW)
+    assert snap is not None and snap.windows[0].window_minutes == 300
 
 
 def test_fetch_passes_token_and_account_id():

@@ -113,7 +113,16 @@ def _codex_usage_lines(env: MobiusEnvironment, now: float) -> list[str]:
     plan = f" ({snapshot.plan_type})" if snapshot.plan_type else ""
     lines = [f"Codex 계정{plan} <...{auth.account_id[-8:]}>"]
     for window in snapshot.windows:
-        lines.append(f"      {window.label:<8}{window.used_percent:>4.0f}%  리셋 {_fmt_in(window.resets_at, now)}")
+        name = {"primary": "주요 한도", "secondary": "보조 한도"}.get(window.name, window.name)
+        if window.window_minutes is None:
+            span = "창 길이 미상"
+        elif window.window_minutes % (24 * 60) == 0:
+            span = f"{window.window_minutes // (24 * 60)}일 창"
+        elif window.window_minutes % 60 == 0:
+            span = f"{window.window_minutes // 60}시간 창"
+        else:
+            span = f"{window.window_minutes}분 창"
+        lines.append(f"      {name:<8}{window.used_percent:>4.0f}%  ({span})  리셋 {_fmt_in(window.resets_at, now)}")
     return lines
 
 
