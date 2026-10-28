@@ -30,3 +30,4 @@ def test_daemon_switches_codex_account_when_active_window_exhausted(env):
     assert daemon.store.file.active_account_id == b.id
     assert CodexConfigIO(env.home).read_auth().account_id == "acct-b"
     assert daemon.store.file.accounts[0].codex_rate_limit is not None
+    assert daemon.store.file.auto_switched_source == "codex"

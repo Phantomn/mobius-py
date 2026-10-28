@@ -208,8 +208,9 @@ class AccountStore:
             self.file.advisory_threshold = threshold
         self.save()
 
-    def set_auto_switched_from_primary(self, flagged: bool) -> None:
+    def set_auto_switched_from_primary(self, flagged: bool, source: str = "claude") -> None:
         self.file.auto_switched_from_primary = flagged
+        self.file.auto_switched_source = source if flagged else None
         self.save()
 
     def set_needs_reauth(self, account_id: str, flag: bool) -> None:

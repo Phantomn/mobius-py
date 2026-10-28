@@ -90,3 +90,10 @@ def test_primary_and_active():
     b = AccountProfile(id="2", nickname="b", email_address="b@x")
     f = AccountsFile(accounts=[a, b], active_account_id="2")
     assert f.primary is a and f.active is b
+
+
+def test_auto_switch_source_roundtrips():
+    f = AccountsFile(auto_switched_from_primary=True, auto_switched_source="codex")
+    restored = AccountsFile.from_dict(f.to_dict())
+    assert restored.auto_switched_from_primary is True
+    assert restored.auto_switched_source == "codex"

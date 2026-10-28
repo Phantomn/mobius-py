@@ -22,7 +22,7 @@ Scope: Claude와 Codex 자격을 사용자에게 하나의 계정 풀로 제공�
 - [x] G4: 기존 Claude 자동 fallback과 전체 회귀가 유지된다
   CHECK: poetry run pytest -q && echo UNIFIED_G4_OK
   EXPECT: /UNIFIED_G4_OK/
-  EVIDENCE: 136 passed; UNIFIED_G4_OK
+  EVIDENCE: 137 passed; UNIFIED_G4_OK
 
 - [x] G5: 제공된 Codex 플러그인이 읽는 로컬 인증 상태와 switch 결과가 연결된다
   EVIDENCE: openai/codex-plugin-cc README states the plugin uses the local Codex CLI and same local authentication state; switch integration test verifies auth.json replacement.

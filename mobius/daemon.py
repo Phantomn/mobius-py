@@ -327,12 +327,13 @@ class Daemon:
             return
         self.engine.note_switched(now)
         self._note_active(now, exact=True)
-        self.store.set_auto_switched_from_primary(True)
+        self.store.set_auto_switched_from_primary(True, source="codex")
         notify(f"🔄 {self._nick(target_id)} 계정으로 전환",
                f"{self._nick(from_id)} Codex 한도 소진 → {self._nick(target_id)}")
 
     def _restore_codex_primary(self, active_id: str, now: float) -> None:
-        if not self.store.file.auto_switched_from_primary:
+        if (not self.store.file.auto_switched_from_primary
+                or self.store.file.auto_switched_source != "codex"):
             return
         primary = self.store.file.primary
         if primary is None or primary.id == active_id or self.store.codex_secret(primary.id) is None:

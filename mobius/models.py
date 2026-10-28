@@ -176,6 +176,7 @@ class AccountsFile:
     desktop_auto_switch_enabled: bool = False
     # 현재 fallback 활성이 "자동 전환"의 결과인가. onTick의 primary 자동 복귀는 이게 true일 때만.
     auto_switched_from_primary: bool = False
+    auto_switched_source: Optional[str] = None
     # 한도 차기 전 미리 전환 — 기본 꺼짐. 켜면 5분마다 활성 계정 사용량을 조회한다(네트워크).
     advisory_enabled: bool = False
     advisory_threshold: float = 90.0    # 50~95
@@ -188,6 +189,7 @@ class AccountsFile:
             "desktopSyncEnabled": self.desktop_sync_enabled,
             "desktopAutoSwitchEnabled": self.desktop_auto_switch_enabled,
             "autoSwitchedFromPrimary": self.auto_switched_from_primary,
+            "autoSwitchedSource": self.auto_switched_source,
             "advisoryEnabled": self.advisory_enabled,
             "advisoryThreshold": self.advisory_threshold,
         }
@@ -201,6 +203,8 @@ class AccountsFile:
             desktop_sync_enabled=bool(d.get("desktopSyncEnabled", True)),
             desktop_auto_switch_enabled=bool(d.get("desktopAutoSwitchEnabled", False)),
             auto_switched_from_primary=bool(d.get("autoSwitchedFromPrimary", False)),
+            auto_switched_source=(str(d["autoSwitchedSource"])
+                                  if d.get("autoSwitchedSource") else None),
             advisory_enabled=bool(d.get("advisoryEnabled", False)),
             advisory_threshold=float(d.get("advisoryThreshold", 90.0)),
         )
