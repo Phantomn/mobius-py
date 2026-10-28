@@ -21,6 +21,7 @@ def test_list_includes_codex_usage(env, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "primary   codex-account  <account-12345678>" in out
     assert "5시간      42%  리셋" in out
+    assert "7일         -  리셋 -" in out
 
 
 def test_status_includes_codex_usage(env, monkeypatch, capsys):
@@ -30,7 +31,9 @@ def test_status_includes_codex_usage(env, monkeypatch, capsys):
         "plus", (UsageWindow("secondary", 8, now + 3600, 10080),), now))
 
     assert cli.main(["status"]) == 0
-    assert "7일        8%  리셋" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "5시간        -  리셋 -" in out
+    assert "7일        8%  리셋" in out
 
 
 def test_capture_registers_codex_in_shared_account_pool(env, capsys):

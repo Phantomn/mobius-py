@@ -90,12 +90,16 @@ def _usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
         reason = _usage_failure(snap.credentials_blob, responses, err, now)
         return [f"      [사용량 조회 실패: {reason}]"]
 
-    return [_usage_row("5시간", u.five_hour_percent, u.five_hour_resets_at, now),
-            _usage_row("7일", u.seven_day_percent, u.seven_day_resets_at, now)]
+    return _render_usage_lines(u, now)
+
+
+def _render_usage_lines(snapshot, now: float) -> list[str]:
+    return [_usage_row("5시간", snapshot.five_hour_percent, snapshot.five_hour_resets_at, now),
+            _usage_row("7일", snapshot.seven_day_percent, snapshot.seven_day_resets_at, now)]
 
 
 def _usage_row(label: str, percent: Optional[float], resets_at: Optional[float], now: float) -> str:
-    p_ = "?" if percent is None else f"{percent:.0f}%"
+    p_ = "-" if percent is None else f"{percent:.0f}%"
     return f"      {label:<8}{p_:>4}  리셋 {_fmt_in(resets_at, now)}"
 
 
@@ -114,12 +118,7 @@ def _codex_snapshot_lines(ctx, p: AccountProfile, now: float) -> list[str]:
         return [f"      [사용량 조회 실패: 네트워크 오류 — {exc}]"]
     if snapshot is None:
         return ["      [사용량 조회 실패: Codex 응답 해석 실패]"]
-    lines = []
-    for window in snapshot.windows:
-        label = {"primary": "5시간", "secondary": "7일"}.get(window.name)
-        if label is not None:
-            lines.append(_usage_row(label, window.used_percent, window.resets_at, now))
-    return lines
+    return _render_usage_lines(snapshot.as_usage_snapshot(), now)
 
 
 def _account_usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
