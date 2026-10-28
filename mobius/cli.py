@@ -16,6 +16,8 @@ from typing import Optional
 
 from . import credentials, usage
 from .claude_config import ClaudeConfigIO
+from .codex_config import CodexAuthError, CodexConfigIO
+from . import codex_usage
 from .env import MobiusEnvironment
 from .models import AccountProfile
 from .store import AccountStore
@@ -198,6 +200,29 @@ def _cmd_status(_args) -> int:
     return 0
 
 
+def _cmd_codex_usage(_args) -> int:
+    env = MobiusEnvironment.live()
+    try:
+        auth = CodexConfigIO(env.home).read_auth()
+        snapshot = codex_usage.fetch(auth, time.time())
+    except CodexAuthError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except codex_usage.Unauthorized:
+        print("Codex 토큰이 거부됐습니다. `codex login`으로 다시 로그인하세요.", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"Codex 사용량 조회 네트워크 오류: {exc}", file=sys.stderr)
+        return 1
+    if snapshot is None:
+        print("Codex 사용량 응답을 해석할 수 없습니다.", file=sys.stderr)
+        return 1
+    print(f"Codex 사용량{f' ({snapshot.plan_type})' if snapshot.plan_type else ''}")
+    for window in snapshot.windows:
+        print(f"  {window.label:<5}{window.used_percent:>5.0f}%  리셋 {_fmt_in(window.resets_at, time.time())}")
+    return 0
+
+
 def _cmd_advisory(args) -> int:
     ctx = _Ctx()
     f = ctx.store.file
@@ -304,6 +329,10 @@ def _build_parser() -> argparse.ArgumentParser:
     rm.set_defaults(func=_cmd_remove)
 
     sub.add_parser("status", help="현재 상태").set_defaults(func=_cmd_status)
+
+    codex = sub.add_parser("codex", help="Codex 계정 사용량")
+    codex_sub = codex.add_subparsers(dest="codex_command", required=True)
+    codex_sub.add_parser("usage", help="현재 Codex 계정 사용량 조회").set_defaults(func=_cmd_codex_usage)
 
     cap = sub.add_parser("capture", help="현재 claude 로그인 계정을 프로필로 캡처")
     cap.add_argument("name", help="저장할 닉네임")
