@@ -17,12 +17,14 @@ class RateLimitInfo:
     recorded_at: float         # epoch 초
     # 모델 전용 한도(예: Fable 주간)인가 — 계정 자체(5시간/주간)는 여유가 있을 수 있다.
     model_scoped: bool = False
+    source: str = "claude"
 
     def to_dict(self) -> dict:
         return {
             "resetsAt": self.resets_at,
             "recordedAt": self.recorded_at,
             "modelScoped": self.model_scoped,
+            "source": self.source,
         }
 
     @staticmethod
@@ -31,6 +33,7 @@ class RateLimitInfo:
             resets_at=float(d["resetsAt"]),
             recorded_at=float(d["recordedAt"]),
             model_scoped=bool(d.get("modelScoped", False)),
+            source=str(d.get("source", "claude")),
         )
 
 
@@ -78,6 +81,7 @@ class AccountProfile:
     tier_description: str = ""
     needs_reauth: bool = False
     rate_limit: Optional[RateLimitInfo] = None
+    codex_rate_limit: Optional[RateLimitInfo] = None
     has_desktop_snapshot: bool = False
     # 사용자가 이 계정을 직접(수동) 골랐는가. true면 모델 전용 한도(Fable 등)로는 밀어내지 않는다.
     user_pinned: bool = False
@@ -100,6 +104,7 @@ class AccountProfile:
             "tierDescription": self.tier_description,
             "needsReauth": self.needs_reauth,
             "rateLimit": self.rate_limit.to_dict() if self.rate_limit else None,
+            "codexRateLimit": self.codex_rate_limit.to_dict() if self.codex_rate_limit else None,
             "hasDesktopSnapshot": self.has_desktop_snapshot,
             "userPinned": self.user_pinned,
             "pinnedAt": self.pinned_at,
@@ -112,6 +117,7 @@ class AccountProfile:
     @staticmethod
     def from_dict(d: dict) -> "AccountProfile":
         rl = d.get("rateLimit")
+        codex_rl = d.get("codexRateLimit")
         ad = d.get("advisory")
         pinned_at = d.get("pinnedAt")
         return AccountProfile(
@@ -122,6 +128,7 @@ class AccountProfile:
             tier_description=str(d.get("tierDescription", "")),
             needs_reauth=bool(d.get("needsReauth", False)),
             rate_limit=RateLimitInfo.from_dict(rl) if rl else None,
+            codex_rate_limit=RateLimitInfo.from_dict(codex_rl) if codex_rl else None,
             has_desktop_snapshot=bool(d.get("hasDesktopSnapshot", False)),
             user_pinned=bool(d.get("userPinned", False)),
             pinned_at=float(pinned_at) if isinstance(pinned_at, (int, float)) else None,

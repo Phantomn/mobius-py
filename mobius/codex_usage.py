@@ -35,6 +35,11 @@ class CodexUsageSnapshot:
     windows: tuple[UsageWindow, ...]
     fetched_at: float
 
+    def account_reset_after(self, now: float) -> Optional[float]:
+        resets = [w.resets_at for w in self.windows
+                  if w.used_percent >= 100 and w.resets_at is not None and w.resets_at > now]
+        return max(resets) if resets else None
+
 
 def _window(name: str, value: object) -> Optional[UsageWindow]:
     if not isinstance(value, dict):

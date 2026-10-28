@@ -4,25 +4,25 @@ OWNS: mobius/**, tests/**, README.md, GATES.md
 
 Scope: Claude와 Codex 자격을 사용자에게 하나의 계정 풀로 제공하고 capture/list/switch/fallback 경로를 검증한다.
 
-- [ ] G1: 기존 Claude accounts.json이 통합 계정 모델로 무손실 로드된다
+- [x] G1: 기존 Claude accounts.json이 통합 계정 모델로 무손실 로드된다
   CHECK: poetry run pytest -q tests/test_models.py tests/test_store.py && echo UNIFIED_G1_OK
   EXPECT: /UNIFIED_G1_OK/
-  EVIDENCE: pending
+  EVIDENCE: 17 passed; UNIFIED_G1_OK
 
-- [ ] G2: 하나의 계정에 Claude와 Codex 자격을 함께 저장하고 다시 읽을 수 있다
+- [x] G2: 하나의 계정에 Claude와 Codex 자격을 함께 저장하고 다시 읽을 수 있다
   CHECK: poetry run pytest -q tests/test_unified_accounts.py && echo UNIFIED_G2_OK
   EXPECT: /UNIFIED_G2_OK/
-  EVIDENCE: pending
+  EVIDENCE: 5 passed; UNIFIED_G2_OK
 
-- [ ] G3: 하나의 계정 목록에서 capture/list/switch가 Claude와 Codex 자격을 함께 처리한다
+- [x] G3: 하나의 계정 목록에서 capture/list/switch가 Claude와 Codex 자격을 함께 처리한다
   CHECK: poetry run pytest -q tests/test_cli_codex.py tests/test_switcher.py && echo UNIFIED_G3_OK
   EXPECT: /UNIFIED_G3_OK/
-  EVIDENCE: pending
+  EVIDENCE: 11 passed; UNIFIED_G3_OK
 
-- [ ] G4: 기존 Claude 자동 fallback과 전체 회귀가 유지된다
+- [x] G4: 기존 Claude 자동 fallback과 전체 회귀가 유지된다
   CHECK: poetry run pytest -q && echo UNIFIED_G4_OK
   EXPECT: /UNIFIED_G4_OK/
-  EVIDENCE: pending
+  EVIDENCE: 136 passed; UNIFIED_G4_OK
 
-- [ ] G5: 제공된 Codex 플러그인이 읽는 로컬 인증 상태와 switch 결과가 연결된다
-  EVIDENCE: pending
+- [x] G5: 제공된 Codex 플러그인이 읽는 로컬 인증 상태와 switch 결과가 연결된다
+  EVIDENCE: openai/codex-plugin-cc README states the plugin uses the local Codex CLI and same local authentication state; switch integration test verifies auth.json replacement.
