@@ -51,6 +51,7 @@ mobius list              # 등록된 계정 목록 (● = 현재 활성)
 mobius switch <이름>      # 해당 계정으로 전환
 mobius remove <이름>      # 안 쓰는 계정 삭제 (활성 계정은 거부 — 먼저 switch)
 mobius status            # 현재 활성 계정 + 자동 전환 상태
+mobius codex usage       # 현재 Codex 로그인 계정의 사용량·리셋 시각 조회
 mobius auto on|off       # 자동 fallback 켜기/끄기
 mobius advisory          # 한도 차기 전 미리 전환 설정 보기
 mobius advisory on --threshold 90   # 켜기 + 임계값(50~95)
@@ -105,6 +106,13 @@ mobius advisory off
 - **관대한 디코드** — `accounts.json` 에 새 필드가 생겨도 구버전 파일이 깨지지 않고,
   손상 시 `accounts.corrupt.json` 으로 백업한 뒤 중단한다(데이터 유실 방지).
 - **실행 중 claude 세션**에는 전환이 즉시 반영되지 않을 수 있다 — 새 세션부터 적용된다.
+
+### Codex 사용량 조회
+
+`mobius codex usage`는 Codex CLI가 저장한 `~/.codex/auth.json`의 현재 ChatGPT 계정으로
+사용량을 조회한다. OAuth 토큰은 Mobius의 `accounts.json`에 복사하거나 출력하지 않는다.
+이 명령은 현재 Codex 계정의 주요·보조 사용 창을 표시하며, Codex 계정 전환이나 Claude의
+자동 fallback 정책에는 관여하지 않는다.
 
 ## 개발/테스트
 
