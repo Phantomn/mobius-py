@@ -97,6 +97,26 @@ def _usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
             row("7일", u.seven_day_percent, u.seven_day_resets_at)]
 
 
+def _codex_usage_lines(env: MobiusEnvironment, now: float) -> list[str]:
+    """현재 Codex 계정 사용량을 기존 계정 화면에 붙인다."""
+    try:
+        auth = CodexConfigIO(env.home).read_auth()
+        snapshot = codex_usage.fetch(auth, now)
+    except CodexAuthError:
+        return []
+    except codex_usage.Unauthorized:
+        return ["Codex  사용량 조회 실패: 토큰 거부(재로그인 필요)"]
+    except OSError as exc:
+        return [f"Codex  사용량 조회 실패: 네트워크 오류 — {exc}"]
+    if snapshot is None:
+        return ["Codex  사용량 조회 실패: 응답 해석 실패"]
+    plan = f" ({snapshot.plan_type})" if snapshot.plan_type else ""
+    lines = [f"Codex 계정{plan} <...{auth.account_id[-8:]}>"]
+    for window in snapshot.windows:
+        lines.append(f"      {window.label:<8}{window.used_percent:>4.0f}%  리셋 {_fmt_in(window.resets_at, now)}")
+    return lines
+
+
 def _cmd_list(_args) -> int:
     ctx = _Ctx()
     ctx.switcher.reconcile()
@@ -105,6 +125,8 @@ def _cmd_list(_args) -> int:
     now = time.time()
     if not ctx.store.file.accounts:
         print("등록된 계정이 없습니다. `mobius capture <이름>`으로 등록하세요.")
+        for line in _codex_usage_lines(ctx.env, now):
+            print(line)
         return 0
     active_id = ctx.store.file.active_account_id
     for i, p in enumerate(ctx.store.file.accounts):
@@ -115,6 +137,8 @@ def _cmd_list(_args) -> int:
               f"{p.tier_description}{_fmt_reset(p, now)}{reauth}")
         for line in _usage_lines(ctx, p, now):
             print(line)
+    for line in _codex_usage_lines(ctx.env, now):
+        print(line)
     return 0
 
 
@@ -183,11 +207,15 @@ def _cmd_status(_args) -> int:
     active = ctx.store.file.active
     if active is None:
         print("활성 계정 없음 (claude 로그아웃 상태이거나 미등록 계정)")
+        for line in _codex_usage_lines(ctx.env, now):
+            print(line)
         return 0
     primary = ctx.store.file.primary
     role = "primary" if primary and active.id == primary.id else "fallback"
     print(f"활성: {active.nickname} <{active.email_address}> ({role}){_fmt_reset(active, now)}")
     for line in _usage_lines(ctx, active, now):
+        print(line)
+    for line in _codex_usage_lines(ctx.env, now):
         print(line)
     print(f"자동 전환: {'켜짐' if ctx.store.file.auto_switch_enabled else '꺼짐'}")
     f = ctx.store.file
@@ -197,29 +225,6 @@ def _cmd_status(_args) -> int:
             print(f"  ⚠️ 현재 {active.advisory.utilization:g}% — 한도가 가까워요")
     else:
         print("미리 전환: 꺼짐")
-    return 0
-
-
-def _cmd_codex_usage(_args) -> int:
-    env = MobiusEnvironment.live()
-    try:
-        auth = CodexConfigIO(env.home).read_auth()
-        snapshot = codex_usage.fetch(auth, time.time())
-    except CodexAuthError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
-    except codex_usage.Unauthorized:
-        print("Codex 토큰이 거부됐습니다. `codex login`으로 다시 로그인하세요.", file=sys.stderr)
-        return 1
-    except OSError as exc:
-        print(f"Codex 사용량 조회 네트워크 오류: {exc}", file=sys.stderr)
-        return 1
-    if snapshot is None:
-        print("Codex 사용량 응답을 해석할 수 없습니다.", file=sys.stderr)
-        return 1
-    print(f"Codex 사용량{f' ({snapshot.plan_type})' if snapshot.plan_type else ''}")
-    for window in snapshot.windows:
-        print(f"  {window.label:<5}{window.used_percent:>5.0f}%  리셋 {_fmt_in(window.resets_at, time.time())}")
     return 0
 
 
@@ -329,10 +334,6 @@ def _build_parser() -> argparse.ArgumentParser:
     rm.set_defaults(func=_cmd_remove)
 
     sub.add_parser("status", help="현재 상태").set_defaults(func=_cmd_status)
-
-    codex = sub.add_parser("codex", help="Codex 계정 사용량")
-    codex_sub = codex.add_subparsers(dest="codex_command", required=True)
-    codex_sub.add_parser("usage", help="현재 Codex 계정 사용량 조회").set_defaults(func=_cmd_codex_usage)
 
     cap = sub.add_parser("capture", help="현재 claude 로그인 계정을 프로필로 캡처")
     cap.add_argument("name", help="저장할 닉네임")
