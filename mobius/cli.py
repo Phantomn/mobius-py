@@ -90,11 +90,17 @@ def _usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
         reason = _usage_failure(snap.credentials_blob, responses, err, now)
         return [f"      [사용량 조회 실패: {reason}]"]
 
-    def row(label, pct, resets_at):
-        p_ = "?" if pct is None else f"{pct:.0f}%"
-        return f"      {label:<8}{p_:>4}  리셋 {_fmt_in(resets_at, now)}"
-    return [row("5시간", u.five_hour_percent, u.five_hour_resets_at),
-            row("7일", u.seven_day_percent, u.seven_day_resets_at)]
+    return _render_usage_lines(u, now)
+
+
+def _render_usage_lines(snapshot, now: float) -> list[str]:
+    return [_usage_row("5시간", snapshot.five_hour_percent, snapshot.five_hour_resets_at, now),
+            _usage_row("7일", snapshot.seven_day_percent, snapshot.seven_day_resets_at, now)]
+
+
+def _usage_row(label: str, percent: Optional[float], resets_at: Optional[float], now: float) -> str:
+    p_ = "-" if percent is None else f"{percent:.0f}%"
+    return f"      {label:<8}{p_:>4}  리셋 {_fmt_in(resets_at, now)}"
 
 
 def _codex_snapshot_lines(ctx, p: AccountProfile, now: float) -> list[str]:
@@ -112,19 +118,7 @@ def _codex_snapshot_lines(ctx, p: AccountProfile, now: float) -> list[str]:
         return [f"      [사용량 조회 실패: 네트워크 오류 — {exc}]"]
     if snapshot is None:
         return ["      [사용량 조회 실패: Codex 응답 해석 실패]"]
-    lines = []
-    for window in snapshot.windows:
-        name = {"primary": "주요 한도", "secondary": "보조 한도"}.get(window.name, window.name)
-        if window.window_minutes is None:
-            span = "창 길이 미상"
-        elif window.window_minutes % (24 * 60) == 0:
-            span = f"{window.window_minutes // (24 * 60)}일 창"
-        elif window.window_minutes % 60 == 0:
-            span = f"{window.window_minutes // 60}시간 창"
-        else:
-            span = f"{window.window_minutes}분 창"
-        lines.append(f"      {name:<8}{window.used_percent:>4.0f}%  ({span})  리셋 {_fmt_in(window.resets_at, now)}")
-    return lines
+    return _render_usage_lines(snapshot.as_usage_snapshot(), now)
 
 
 def _account_usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:

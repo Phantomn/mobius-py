@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .codex_config import CodexAuth
+from .models import UsageSnapshot
 
 ENDPOINT = "https://chatgpt.com/backend-api/wham/usage"
 
@@ -39,6 +40,20 @@ class CodexUsageSnapshot:
         resets = [w.resets_at for w in self.windows
                   if w.used_percent >= 100 and w.resets_at is not None and w.resets_at > now]
         return max(resets) if resets else None
+
+    def as_usage_snapshot(self) -> UsageSnapshot:
+        """Codex 창을 CLI 공통 5시간/7일 사용량 모델로 정규화한다."""
+        five_percent = five_reset = seven_percent = seven_reset = None
+        for window in self.windows:
+            if window.window_minutes == 300:
+                five_percent, five_reset = window.used_percent, window.resets_at
+            elif window.window_minutes == 7 * 24 * 60:
+                seven_percent, seven_reset = window.used_percent, window.resets_at
+        return UsageSnapshot(
+            five_hour_percent=five_percent, five_hour_resets_at=five_reset,
+            seven_day_percent=seven_percent, seven_day_resets_at=seven_reset,
+            fetched_at=self.fetched_at,
+        )
 
 
 def _window(name: str, value: object) -> Optional[UsageWindow]:

@@ -37,6 +37,16 @@ def test_parse_accepts_codex_window_minutes():
     assert snap is not None and snap.windows[0].window_minutes == 300
 
 
+def test_normalizes_windows_by_duration_not_primary_secondary_name():
+    snap = parse(json.dumps({"rate_limit": {"primary_window": {
+        "used_percent": 45, "window_minutes": 10080, "reset_at": 1700100000,
+    }}}).encode(), NOW)
+    usage = snap.as_usage_snapshot()
+    assert usage.five_hour_percent is None
+    assert usage.seven_day_percent == 45
+    assert usage.seven_day_resets_at == 1700100000
+
+
 def test_fetch_passes_token_and_account_id():
     seen = []
     auth = type("Auth", (), {"access_token": "secret", "account_id": "acct"})()
