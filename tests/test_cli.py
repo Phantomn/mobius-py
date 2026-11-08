@@ -34,6 +34,17 @@ def test_remove_unknown_name(env):
     assert cli.main(["remove", "nope"]) == 1
 
 
+def test_move_fallback(env):
+    a, b = _two_accounts(env)
+    store = AccountStore(env)
+    c = store.upsert_profile("c", _snap("c@x", "C"))
+    d = store.upsert_profile("d", _snap("d@x", "D"))
+    assert cli.main(["move", "3", "1"]) == 0
+    assert [p.id for p in AccountStore(env).file.accounts] == [a.id, d.id, b.id, c.id]
+    assert cli.main(["move", "0", "1"]) == 1  # primary 는 못 옮긴다
+    assert cli.main(["move", "1", "9"]) == 1
+
+
 def test_list_queries_usage_with_rotated_live_token(env, monkeypatch):
     # claude 가 활성 계정 토큰을 교체한 직후(데몬 싱크 전) — 저장 사본(at-A)은 낡았다.
     a, _ = _two_accounts(env)

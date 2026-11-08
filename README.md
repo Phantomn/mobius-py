@@ -49,6 +49,7 @@ pip install --user -e mobius-py
 mobius capture <이름>     # 현재 Claude/Codex 로그인 자격을 하나의 계정 프로필로 저장
 mobius list              # 등록된 계정 목록 (● = 현재 활성)
 mobius switch <이름>      # 해당 계정으로 전환
+mobius move <from> <to>  # fallback 순서 변경 (list의 fallback 번호, 예: move 3 1)
 mobius remove <이름>      # 안 쓰는 계정 삭제 (활성 계정은 거부 — 먼저 switch)
 mobius status            # 현재 활성 계정 + 자동 전환 상태
 mobius auto on|off       # 자동 fallback 켜기/끄기

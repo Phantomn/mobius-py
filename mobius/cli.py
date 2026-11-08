@@ -20,7 +20,7 @@ from .codex_config import CodexAuthError, CodexConfigIO
 from . import codex_usage
 from .env import MobiusEnvironment
 from .models import AccountProfile
-from .store import AccountStore
+from .store import AccountStore, CannotMovePrimary
 from .switcher import Switcher
 
 
@@ -185,6 +185,18 @@ def _cmd_primary(args) -> int:
     return 0
 
 
+def _cmd_move(args) -> int:
+    ctx = _Ctx()
+    try:
+        ctx.store.move_fallback(args.src, args.dst)
+    except CannotMovePrimary:
+        print(f"fallback 번호는 1~{len(ctx.store.file.accounts) - 1} 사이여야 합니다 "
+              "(primary 변경은 `mobius primary`).", file=sys.stderr)
+        return 1
+    print(f"순서 변경: fallback{args.src} → fallback{args.dst}")
+    return 0
+
+
 def _cmd_remove(args) -> int:
     ctx = _Ctx()
     ctx.switcher.reconcile()
@@ -344,6 +356,11 @@ def _build_parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("primary", help="지정 계정을 주 계정(primary)으로 승격 — main/fallback 교체")
     pr.add_argument("name", help="주 계정으로 만들 닉네임")
     pr.set_defaults(func=_cmd_primary)
+
+    mv = sub.add_parser("move", help="fallback 순서 변경 — `mobius list`의 fallback 번호 기준")
+    mv.add_argument("src", type=int, help="옮길 fallback 번호")
+    mv.add_argument("dst", type=int, help="새 fallback 번호")
+    mv.set_defaults(func=_cmd_move)
 
     rm = sub.add_parser("remove", help="등록된 계정 프로필과 저장된 자격증명 사본 삭제")
     rm.add_argument("name", help="삭제할 계정 닉네임")
