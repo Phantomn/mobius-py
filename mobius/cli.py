@@ -16,9 +16,11 @@ from typing import Optional
 
 from . import credentials, usage
 from .claude_config import ClaudeConfigIO
+from .codex_config import CodexAuthError, CodexConfigIO
+from . import codex_usage
 from .env import MobiusEnvironment
 from .models import AccountProfile
-from .store import AccountStore
+from .store import AccountStore, CannotMovePrimary
 from .switcher import Switcher
 
 
@@ -88,15 +90,44 @@ def _usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
         reason = _usage_failure(snap.credentials_blob, responses, err, now)
         return [f"      [사용량 조회 실패: {reason}]"]
 
-    def row(label, pct, resets_at):
-        p_ = "?" if pct is None else f"{pct:.0f}%"
-        return f"      {label:<8}{p_:>4}  리셋 {_fmt_in(resets_at, now)}"
-    return [row("5시간", u.five_hour_percent, u.five_hour_resets_at),
-            row("7일", u.seven_day_percent, u.seven_day_resets_at)]
+    return _render_usage_lines(u, now)
+
+
+def _render_usage_lines(snapshot, now: float) -> list[str]:
+    return [_usage_row("5시간", snapshot.five_hour_percent, snapshot.five_hour_resets_at, now),
+            _usage_row("7일", snapshot.seven_day_percent, snapshot.seven_day_resets_at, now)]
+
+
+def _usage_row(label: str, percent: Optional[float], resets_at: Optional[float], now: float) -> str:
+    p_ = "-" if percent is None else f"{percent:.0f}%"
+    return f"      {label:<8}{p_:>4}  리셋 {_fmt_in(resets_at, now)}"
+
+
+def _codex_snapshot_lines(ctx, p: AccountProfile, now: float) -> list[str]:
+    stored = ctx.store.codex_secret(p.id)
+    if stored is None:
+        return []
+    try:
+        auth = CodexConfigIO.parse_auth(stored.auth_blob)
+        snapshot = codex_usage.fetch(auth, now)
+    except CodexAuthError:
+        return ["      [사용량 조회 실패: Codex 인증 형식 오류]"]
+    except codex_usage.Unauthorized:
+        return ["      [사용량 조회 실패: Codex 토큰 거부(재로그인 필요)]"]
+    except OSError as exc:
+        return [f"      [사용량 조회 실패: 네트워크 오류 — {exc}]"]
+    if snapshot is None:
+        return ["      [사용량 조회 실패: Codex 응답 해석 실패]"]
+    return _render_usage_lines(snapshot.as_usage_snapshot(), now)
+
+
+def _account_usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
+    return _usage_lines(ctx, p, now) + _codex_snapshot_lines(ctx, p, now)
 
 
 def _cmd_list(_args) -> int:
     ctx = _Ctx()
+    ctx.switcher.adopt_codex_account_if_unregistered()
     ctx.switcher.reconcile()
     # 활성 계정 사본은 claude 가 토큰을 교체한 뒤 데몬의 5분 싱크 전까지 낡아 있다 — 조회 전에 맞춘다.
     ctx.switcher.refresh_active_snapshot_if_stable()
@@ -111,7 +142,7 @@ def _cmd_list(_args) -> int:
         reauth = "  [재로그인 필요]" if p.needs_reauth else ""
         print(f"{active} {role}  {p.nickname}  <{p.email_address}>  "
               f"{p.tier_description}{_fmt_reset(p, now)}{reauth}")
-        for line in _usage_lines(ctx, p, now):
+        for line in _account_usage_lines(ctx, p, now):
             print(line)
     return 0
 
@@ -133,7 +164,7 @@ def _cmd_switch(args) -> int:
     ctx.store.set_user_pinned(target.id, time.time())
     ctx.store.set_auto_switched_from_primary(False)
     print(f"전환 완료 → {target.nickname} <{target.email_address}>")
-    print("실행 중인 claude 세션엔 즉시 적용되지 않을 수 있습니다 — 그 경우 세션을 새로 시작하세요.")
+    print("실행 중인 세션에는 즉시 적용되지 않을 수 있습니다 — 새 세션이나 새 Codex 작업부터 적용하세요.")
     return 0
 
 
@@ -151,6 +182,18 @@ def _cmd_primary(args) -> int:
     ctx.store.set_primary(target.id)
     print(f"주 계정 변경: {old_primary} → {target.nickname} (기존 주 계정은 fallback으로 내려갑니다)")
     print("※ 이 명령은 우선순위만 바꿉니다. 지금 활성 계정을 바꾸려면 `mobius switch` 를 쓰세요.")
+    return 0
+
+
+def _cmd_move(args) -> int:
+    ctx = _Ctx()
+    try:
+        ctx.store.move_fallback(args.src, args.dst)
+    except CannotMovePrimary:
+        print(f"fallback 번호는 1~{len(ctx.store.file.accounts) - 1} 사이여야 합니다 "
+              "(primary 변경은 `mobius primary`).", file=sys.stderr)
+        return 1
+    print(f"순서 변경: fallback{args.src} → fallback{args.dst}")
     return 0
 
 
@@ -174,6 +217,7 @@ def _cmd_remove(args) -> int:
 
 def _cmd_status(_args) -> int:
     ctx = _Ctx()
+    ctx.switcher.adopt_codex_account_if_unregistered()
     ctx.switcher.reconcile()
     # 활성 계정 사본은 claude 가 토큰을 교체한 뒤 데몬의 5분 싱크 전까지 낡아 있다 — 조회 전에 맞춘다.
     ctx.switcher.refresh_active_snapshot_if_stable()
@@ -185,7 +229,7 @@ def _cmd_status(_args) -> int:
     primary = ctx.store.file.primary
     role = "primary" if primary and active.id == primary.id else "fallback"
     print(f"활성: {active.nickname} <{active.email_address}> ({role}){_fmt_reset(active, now)}")
-    for line in _usage_lines(ctx, active, now):
+    for line in _account_usage_lines(ctx, active, now):
         print(line)
     print(f"자동 전환: {'켜짐' if ctx.store.file.auto_switch_enabled else '꺼짐'}")
     f = ctx.store.file
@@ -224,17 +268,31 @@ def _cmd_advisory(args) -> int:
 
 def _cmd_capture(args) -> int:
     ctx = _Ctx()
-    snap = ctx.io.read_live_snapshot()
-    if snap is None:
-        print("claude 로그인 상태가 아닙니다. 먼저 `claude`에서 /login 하세요.", file=sys.stderr)
+    claude_snap = ctx.io.read_live_snapshot()
+    codex_snap = None
+    try:
+        codex_snap = ctx.switcher.codex_io.read_snapshot()
+    except CodexAuthError:
+        pass
+    if claude_snap is None and codex_snap is None:
+        print("Claude 또는 Codex 로그인 상태가 아닙니다.", file=sys.stderr)
         return 1
     try:
-        p = ctx.store.upsert_profile(args.name, snap)
+        p = ctx.store.upsert_profile(args.name, claude_snap) if claude_snap else None
+        if codex_snap is not None:
+            p = ctx.store.upsert_codex_profile(args.name, codex_snap)
+        if p is None:
+            raise RuntimeError("계정을 만들지 못했습니다")
     except Exception as e:
         print(f"캡처 실패: {e}", file=sys.stderr)
         return 1
     ctx.store.set_active(p.id)
-    print(f"캡처 완료: {p.nickname} <{p.email_address}> {p.tier_description}")
+    attached = []
+    if claude_snap is not None:
+        attached.append("Claude")
+    if codex_snap is not None:
+        attached.append("Codex")
+    print(f"캡처 완료: {p.nickname} <{p.email_address}> ({', '.join(attached)})")
     return 0
 
 
@@ -298,6 +356,11 @@ def _build_parser() -> argparse.ArgumentParser:
     pr = sub.add_parser("primary", help="지정 계정을 주 계정(primary)으로 승격 — main/fallback 교체")
     pr.add_argument("name", help="주 계정으로 만들 닉네임")
     pr.set_defaults(func=_cmd_primary)
+
+    mv = sub.add_parser("move", help="fallback 순서 변경 — `mobius list`의 fallback 번호 기준")
+    mv.add_argument("src", type=int, help="옮길 fallback 번호")
+    mv.add_argument("dst", type=int, help="새 fallback 번호")
+    mv.set_defaults(func=_cmd_move)
 
     rm = sub.add_parser("remove", help="등록된 계정 프로필과 저장된 자격증명 사본 삭제")
     rm.add_argument("name", help="삭제할 계정 닉네임")

@@ -63,7 +63,8 @@ class AutoSwitchEngine:
     def _first_available(file: AccountsFile, excluding: Optional[str], now: float) -> Optional[str]:
         """후보: 순서(우선순위)대로, 한도 안 걸렸고 재인증 불필요한 계정."""
         for a in file.accounts:
-            if a.id != excluding and not a.is_limited(now) and not a.needs_reauth:
+            if (a.id != excluding and a.has_claude_credentials
+                    and not a.is_limited(now) and not a.needs_reauth):
                 return a.id
         return None
 

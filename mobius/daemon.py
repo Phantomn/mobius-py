@@ -12,10 +12,11 @@ import time
 from enum import Enum
 from typing import Optional
 
-from . import credentials, usage
+from . import codex_usage, credentials, usage
 from .autoswitch import (AutoSwitchEngine, CandidateProbeAction, Decision, DecisionKind,
                          SwitchReason)
 from .claude_config import ClaudeConfigIO
+from .codex_config import CodexAuthError, CodexConfigIO
 from .env import MobiusEnvironment
 from .fallback_check import FallbackAuthChecker, FallbackCheckResult
 from .log_watcher import SessionLogWatcher
@@ -35,6 +36,7 @@ PROACTIVE_PER_ACCOUNT_GATE = 6 * 3600.0
 # upstream(AppState.refreshUsageIfStale)은 팝오버 열 때마다 돌지만, 데몬엔 UI 이벤트가 없으므로
 # 시간 게이트로 대신한다. 딱지 붙은 계정만 대상이라 평시 네트워크는 0이다.
 REAUTH_RECHECK_INTERVAL = 30 * 60.0
+CODEX_USAGE_POLL_INTERVAL = 5 * 60.0
 # 로그 hit 검증용 usage 조회의 최소 간격(계정당). 한 번도 본 적 없는 큰 세션 파일이
 # 과거 hit 를 무더기로 쏟아낼 때 조회가 hit 수만큼 늘어나는 것을 막는다.
 # ★ 이 창 안에 도착한 hit 는 **버리지 않는다** — 판정 보류(UNKNOWN)로 두고 다시 시도한다.
@@ -108,6 +110,7 @@ class Daemon:
         self._last_proactive_sweep = float("-inf")
         self._last_proactive_refresh: dict[str, float] = {}
         self._last_reauth_recheck: dict[str, float] = {}
+        self._last_codex_usage_poll = float("-inf")
         self._last_usage_verify: dict[str, float] = {}
         self._last_usage_refresh_attempt: dict[str, float] = {}
         self._last_advised_resets_at: dict[str, float] = {}
@@ -121,6 +124,7 @@ class Daemon:
         self._last_tick_at: Optional[float] = None
         # usage 조회 transport — 테스트가 네트워크 없이 주입한다(None = 실제 HTTP).
         self.usage_transport = None
+        self.codex_usage_transport = None
         self._stop = False
 
     # ---------- 루프 ----------
@@ -150,6 +154,7 @@ class Daemon:
             self._last_reconcile = now
             try:
                 self.switcher.adopt_live_account_if_unregistered()
+                self.switcher.adopt_codex_account_if_unregistered()
                 self.switcher.reconcile()
             except Exception:
                 pass
@@ -173,6 +178,12 @@ class Daemon:
         self._note_active(now)
 
         self._clear_expired_rate_limits(now)
+        if now - self._last_codex_usage_poll >= CODEX_USAGE_POLL_INTERVAL:
+            self._last_codex_usage_poll = now
+            try:
+                self._poll_codex_usage(now)
+            except Exception as e:
+                print(f"[mobius] Codex 사용량 폴 오류: {e}", flush=True)
         self._recheck_flagged_accounts(now)
 
         if now - self._last_proactive_sweep >= PROACTIVE_SWEEP_INTERVAL:
@@ -262,6 +273,82 @@ class Daemon:
                    f"{self._nick(from_id)} 한도 소진 → {name}. 새 claude 세션부터 적용돼요.")
 
     # ---------- 임계값 선제 전환 ----------
+
+    def _poll_codex_usage(self, now: float) -> None:
+        """현재 통합 계정의 Codex 한도를 조회하고 Codex fallback을 적용한다."""
+        active = self.store.file.active
+        if active is None:
+            return
+        stored = self.store.codex_secret(active.id)
+        if stored is None:
+            return
+        try:
+            auth = CodexConfigIO.parse_auth(stored.auth_blob)
+            snap = codex_usage.fetch(auth, now, self.codex_usage_transport)
+        except (CodexAuthError, codex_usage.Unauthorized, OSError):
+            return
+        if snap is None:
+            return
+        reset = snap.account_reset_after(now)
+        if reset is None:
+            if active.codex_rate_limit is not None:
+                self.store.update(active.id, lambda p: setattr(p, "codex_rate_limit", None))
+            self._restore_codex_primary(active.id, now)
+            return
+        self.store.update(active.id, lambda p: setattr(
+            p, "codex_rate_limit", RateLimitInfo(reset, now, source="codex")))
+        if not self.store.file.auto_switch_enabled:
+            return
+        target = self._probe_codex_candidate(active.id, now)
+        if target is not None:
+            self._switch_codex_account(target, now)
+
+    def _probe_codex_candidate(self, active_id: str, now: float) -> Optional[str]:
+        for p in self.store.file.accounts:
+            if p.id == active_id or p.codex_rate_limit is not None:
+                continue
+            stored = self.store.codex_secret(p.id)
+            if stored is None:
+                continue
+            try:
+                auth = CodexConfigIO.parse_auth(stored.auth_blob)
+                snap = codex_usage.fetch(auth, now, self.codex_usage_transport)
+            except (CodexAuthError, codex_usage.Unauthorized, OSError):
+                continue
+            if snap is not None and snap.account_reset_after(now) is None:
+                return p.id
+        return None
+
+    def _switch_codex_account(self, target_id: str, now: float) -> None:
+        from_id = self.store.file.active_account_id
+        try:
+            self.switcher.switch_to(target_id)
+        except Exception as exc:
+            print(f"[mobius] Codex 자동 전환 실패: {exc}", flush=True)
+            return
+        self.engine.note_switched(now)
+        self._note_active(now, exact=True)
+        self.store.set_auto_switched_from_primary(True, source="codex")
+        notify(f"🔄 {self._nick(target_id)} 계정으로 전환",
+               f"{self._nick(from_id)} Codex 한도 소진 → {self._nick(target_id)}")
+
+    def _restore_codex_primary(self, active_id: str, now: float) -> None:
+        if (not self.store.file.auto_switched_from_primary
+                or self.store.file.auto_switched_source != "codex"):
+            return
+        primary = self.store.file.primary
+        if primary is None or primary.id == active_id or self.store.codex_secret(primary.id) is None:
+            return
+        if primary.codex_rate_limit is not None:
+            return
+        try:
+            self.switcher.switch_to(primary.id)
+        except Exception:
+            return
+        self.engine.note_switched(now)
+        self._note_active(now, exact=True)
+        self.store.set_auto_switched_from_primary(False)
+        notify(f"✅ {self._nick(primary.id)} 계정으로 복귀", "Codex 한도가 초기화돼 주 계정으로 돌아왔어요.")
 
     def _poll_threshold(self, now: float) -> None:
         """활성 계정 사용률을 보고 advisory 를 set/clear 한 뒤, 유효하면 후보 탐색→판정→적용.
@@ -588,12 +675,17 @@ class Daemon:
         """
         for p in list(self.store.file.accounts):
             rl = p.rate_limit
-            if rl is None or now < rl.resets_at:
-                continue
-            try:
-                self.store.update(p.id, lambda x: setattr(x, "rate_limit", None))
-            except Exception:
-                pass
+            if rl is not None and now >= rl.resets_at:
+                try:
+                    self.store.update(p.id, lambda x: setattr(x, "rate_limit", None))
+                except Exception:
+                    pass
+            codex_rl = p.codex_rate_limit
+            if codex_rl is not None and now >= codex_rl.resets_at:
+                try:
+                    self.store.update(p.id, lambda x: setattr(x, "codex_rate_limit", None))
+                except Exception:
+                    pass
 
     def _preflight_fallback(self, account_id: str, now: float) -> bool:
         r = self.fallback_checker.check(account_id, self.store.file.active_account_id,

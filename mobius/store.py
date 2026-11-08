@@ -13,8 +13,8 @@ from typing import Callable, Optional
 from . import credentials
 from .env import MobiusEnvironment
 from .fsutil import write_atomic
-from .models import (AccountProfile, AccountsFile, AdvisoryRecord, CredentialsSnapshot,
-                     new_account_id)
+from .models import (AccountProfile, AccountSecrets, AccountsFile, AdvisoryRecord,
+                     CodexCredentialsSnapshot, CredentialsSnapshot, new_account_id)
 
 
 class AccountStoreError(Exception):
@@ -107,14 +107,51 @@ class AccountStore:
         self.save()
         return profile
 
+    def upsert_codex_profile(self, nickname: str,
+                             snapshot: CodexCredentialsSnapshot) -> AccountProfile:
+        """Codex 자격을 기존 닉네임 계정에 병합하거나 통합 계정을 만든다."""
+        existing = next((a for a in self.file.accounts
+                         if a.codex_account_id == snapshot.account_id
+                         or (a.nickname == nickname and a.codex_account_id is None)), None)
+        if existing is not None:
+            profile = existing
+        else:
+            profile = AccountProfile(
+                id=new_account_id(), nickname=nickname,
+                email_address=snapshot.account_id,
+                tier_description=snapshot.plan_type,
+                codex_account_id=snapshot.account_id,
+                codex_plan_type=snapshot.plan_type,
+                has_claude_credentials=False,
+            )
+            self.file.accounts.append(profile)
+            if self.file.active_account_id is None:
+                self.file.active_account_id = profile.id
+        profile.codex_account_id = snapshot.account_id
+        if snapshot.plan_type:
+            profile.codex_plan_type = snapshot.plan_type
+            if not profile.tier_description:
+                profile.tier_description = snapshot.plan_type
+        self.set_codex_secret(snapshot, profile.id)
+        self.save()
+        return profile
+
     # ---------- 비밀 스냅샷 (0600 파일) ----------
 
     def secret(self, account_id: str) -> Optional[CredentialsSnapshot]:
+        stored = self.secrets(account_id)
+        return stored.claude if stored else None
+
+    def secrets(self, account_id: str) -> Optional[AccountSecrets]:
         try:
             data = self.env.secret_file(account_id).read_bytes()
         except OSError:
             return None
-        return CredentialsSnapshot.from_dict(json.loads(data))
+        return AccountSecrets.from_dict(json.loads(data))
+
+    def codex_secret(self, account_id: str) -> Optional[CodexCredentialsSnapshot]:
+        stored = self.secrets(account_id)
+        return stored.codex if stored else None
 
     def set_secret(self, snapshot: CredentialsSnapshot, account_id: str) -> None:
         # needsReauth 는 "저장된 refresh 토큰이 폐기됨"이라는 **그 토큰에 대한** 판정이다.
@@ -133,12 +170,25 @@ class AccountStore:
             self.env.secrets_dir.chmod(0o700)
         except OSError:
             pass
-        data = json.dumps(snapshot.to_dict()).encode("utf-8")
+        stored = self.secrets(account_id) or AccountSecrets()
+        stored.claude = snapshot
+        data = json.dumps(stored.to_dict()).encode("utf-8")
         write_atomic(data, self.env.secret_file(account_id), 0o600)
 
         if flagged and credentials.refresh_token_rotated(
                 prev.credentials_blob if prev else None, snapshot.credentials_blob):
             self.set_needs_reauth(account_id, False)
+
+    def set_codex_secret(self, snapshot: CodexCredentialsSnapshot, account_id: str) -> None:
+        self.env.secrets_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.env.secrets_dir.chmod(0o700)
+        except OSError:
+            pass
+        stored = self.secrets(account_id) or AccountSecrets()
+        stored.codex = snapshot
+        data = json.dumps(stored.to_dict()).encode("utf-8")
+        write_atomic(data, self.env.secret_file(account_id), 0o600)
 
     # ---------- 상태 변경 ----------
 
@@ -158,8 +208,9 @@ class AccountStore:
             self.file.advisory_threshold = threshold
         self.save()
 
-    def set_auto_switched_from_primary(self, flagged: bool) -> None:
+    def set_auto_switched_from_primary(self, flagged: bool, source: str = "claude") -> None:
         self.file.auto_switched_from_primary = flagged
+        self.file.auto_switched_source = source if flagged else None
         self.save()
 
     def set_needs_reauth(self, account_id: str, flag: bool) -> None:
