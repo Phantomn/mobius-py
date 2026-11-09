@@ -38,10 +38,13 @@ Linux의 Claude Code는 자격증명을 **Keychain이 아니라 `~/.claude/.cred
 
 ```bash
 git clone https://github.com/Phantomn/mobius-py.git
-pip install --user -e mobius-py
+pip install --user ./mobius-py
 ```
 
-`mobius` 명령이 PATH에 생긴다. (설치 없이 `PYTHONPATH=. python3 -m mobius ...` 로도 실행 가능)
+`mobius` 명령이 PATH에 생긴다. 코드를 복사해 설치하므로 저장소를 옮겨도 동작한다.
+저장소 코드를 고친 뒤에는 같은 명령으로 다시 설치하고 `systemctl --user restart mobius`로 반영한다.
+(`-e` 편집 설치는 저장소 절대경로를 기록해 저장소를 옮기면 `ModuleNotFoundError`로 깨진다.)
+(설치 없이 `PYTHONPATH=. python3 -m mobius ...` 로도 실행 가능)
 
 ## 사용법
 
