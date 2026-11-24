@@ -138,3 +138,21 @@ def test_adopt_unregistered_codex_account(env):
     assert profile is not None
     assert profile.nickname == "account-acct-new"
     assert store.codex_secret(profile.id).account_id == "acct-new"
+
+
+def test_removed_live_codex_account_not_readopted_until_relogin(env):
+    codex_io = CodexConfigIO(env.home)
+    codex_io.write_auth(b'{"tokens":{"access_token":"at","account_id":"acct-old"}}')
+    store = AccountStore(env)
+    sw = Switcher(store, ClaudeConfigIO(env), codex_io)
+    profile = sw.adopt_codex_account_if_unregistered()
+
+    sw.dismiss_live_codex(profile.codex_account_id)
+    store.remove(profile.id)
+    store.reload()
+
+    assert sw.adopt_codex_account_if_unregistered() is None
+    assert store.file.accounts == []
+
+    codex_io.write_auth(b'{"tokens":{"access_token":"at2","account_id":"acct-old"}}')
+    assert sw.adopt_codex_account_if_unregistered() is not None
