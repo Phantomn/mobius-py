@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Optional
 
 from .claude_config import ClaudeConfigIO
@@ -124,6 +125,8 @@ class Switcher:
             live = self.codex_io.read_snapshot()
         except Exception:
             return None
+        if hashlib.sha256(live.auth_blob).hexdigest() == self.store.file.dismissed_codex_auth_sha256:
+            return None
         existing = next((a for a in self.store.file.accounts
                          if a.codex_account_id == live.account_id), None)
         if existing is not None:
@@ -135,6 +138,18 @@ class Switcher:
         if self.store.file.active_account_id is None:
             self.store.set_active(profile.id)
         return profile
+
+    def dismiss_live_codex(self, codex_account_id: Optional[str]) -> None:
+        """지울 계정이 라이브 Codex 인증이면 그 내용을 재채택 대상에서 뺀다."""
+        if codex_account_id is None:
+            return
+        try:
+            live = self.codex_io.read_snapshot()
+        except Exception:
+            return
+        if live.account_id == codex_account_id:
+            self.store.file.dismissed_codex_auth_sha256 = hashlib.sha256(live.auth_blob).hexdigest()
+            self.store.save()
 
     def reconcile(self) -> None:
         """외부 재로그인 감지 시 상태 대사: 라이브 email이 아는 프로필이면 활성 표시+토큰 흡수."""

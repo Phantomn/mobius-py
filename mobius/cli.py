@@ -210,6 +210,7 @@ def _cmd_remove(args) -> int:
         print(f"{target.nickname} 은(는) 현재 활성 계정이라 삭제할 수 없습니다. "
               "먼저 `mobius switch` 로 다른 계정으로 전환하세요.", file=sys.stderr)
         return 1
+    ctx.switcher.dismiss_live_codex(target.codex_account_id)
     ctx.store.remove(target.id)
     print(f"삭제 완료: {target.nickname} <{target.email_address}> (저장된 자격증명 사본도 삭제)")
     return 0

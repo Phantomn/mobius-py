@@ -180,6 +180,9 @@ class AccountsFile:
     # 한도 차기 전 미리 전환 — 기본 꺼짐. 켜면 5분마다 활성 계정 사용량을 조회한다(네트워크).
     advisory_enabled: bool = False
     advisory_threshold: float = 90.0    # 50~95
+    # remove 로 지운 계정이 아직 ~/.codex/auth.json 에 남아 있을 때 그 파일 내용의 sha256.
+    # 같은 내용이면 재채택하지 않고, codex 재로그인으로 파일이 바뀌면 다시 채택한다.
+    dismissed_codex_auth_sha256: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -192,6 +195,7 @@ class AccountsFile:
             "autoSwitchedSource": self.auto_switched_source,
             "advisoryEnabled": self.advisory_enabled,
             "advisoryThreshold": self.advisory_threshold,
+            "dismissedCodexAuthSHA256": self.dismissed_codex_auth_sha256,
         }
 
     @staticmethod
@@ -207,6 +211,7 @@ class AccountsFile:
                                   if d.get("autoSwitchedSource") else None),
             advisory_enabled=bool(d.get("advisoryEnabled", False)),
             advisory_threshold=float(d.get("advisoryThreshold", 90.0)),
+            dismissed_codex_auth_sha256=d.get("dismissedCodexAuthSHA256"),
         )
 
     @property
