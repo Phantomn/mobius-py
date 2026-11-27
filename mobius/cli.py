@@ -90,17 +90,18 @@ def _usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
         reason = _usage_failure(snap.credentials_blob, responses, err, now)
         return [f"      [사용량 조회 실패: {reason}]"]
 
-    return _render_usage_lines(u, now)
+    return _render_usage_lines(u, now, "Claude")
 
 
-def _render_usage_lines(snapshot, now: float) -> list[str]:
-    return [_usage_row("5시간", snapshot.five_hour_percent, snapshot.five_hour_resets_at, now),
-            _usage_row("7일", snapshot.seven_day_percent, snapshot.seven_day_resets_at, now)]
+def _render_usage_lines(snapshot, now: float, provider: str) -> list[str]:
+    return [_usage_row(provider, "5시간", snapshot.five_hour_percent, snapshot.five_hour_resets_at, now),
+            _usage_row(provider, "7일", snapshot.seven_day_percent, snapshot.seven_day_resets_at, now)]
 
 
-def _usage_row(label: str, percent: Optional[float], resets_at: Optional[float], now: float) -> str:
+def _usage_row(provider: str, label: str, percent: Optional[float], resets_at: Optional[float],
+               now: float) -> str:
     p_ = "-" if percent is None else f"{percent:.0f}%"
-    return f"      {label:<8}{p_:>4}  리셋 {_fmt_in(resets_at, now)}"
+    return f"      {provider:<7}{label:<8}{p_:>4}  리셋 {_fmt_in(resets_at, now)}"
 
 
 def _codex_snapshot_lines(ctx, p: AccountProfile, now: float) -> list[str]:
@@ -118,7 +119,7 @@ def _codex_snapshot_lines(ctx, p: AccountProfile, now: float) -> list[str]:
         return [f"      [사용량 조회 실패: 네트워크 오류 — {exc}]"]
     if snapshot is None:
         return ["      [사용량 조회 실패: Codex 응답 해석 실패]"]
-    return _render_usage_lines(snapshot.as_usage_snapshot(), now)
+    return _render_usage_lines(snapshot.as_usage_snapshot(), now, "Codex")
 
 
 def _account_usage_lines(ctx, p: AccountProfile, now: float) -> list[str]:
