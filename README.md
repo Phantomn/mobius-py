@@ -68,6 +68,9 @@ mobius auto --install-service   # systemd user unit 생성
 2. 다른 계정으로 로그인 → `mobius capture 개인계정`
 3. `mobius list` 로 확인. 모든 계정은 하나의 primary/fallback 순서를 공유한다.
 
+같은 이메일로 팀 조직과 개인 조직을 함께 쓰면 조직마다 따로 로그인해 각각 다른 이름으로 `capture`한다.
+Claude 계정은 이메일과 `~/.claude.json` 의 `organizationUuid` 로 구분하며, `list` 에 조직 이름이 함께 보인다.
+
 Claude와 Codex 자격이 같은 계정에 로그인되어 있을 때 같은 이름으로 다시 `capture`하면
 하나의 프로필에 두 자격이 병합된다. `mobius switch <이름>`은 해당 프로필에 저장된 자격을
 교체하며, Codex 플러그인은 다음 작업부터 교체된 `~/.codex/auth.json`을 사용한다.

@@ -57,9 +57,10 @@ def creds_blob(tag="A", expires_ms=1900000000000, refresh_token=None, rte_ms=Non
 
 
 def write_live(env, tag="A", email="a@example.com", org="Org",
-               tier_key="organizationRateLimitTier", tier="default_claude_max_20x", **kw):
+               tier_key="organizationRateLimitTier", tier="default_claude_max_20x",
+               org_uuid=None, **kw):
     env.credentials_file.write_bytes(creds_blob(tag, **kw))
-    env.claude_json.write_text(json.dumps({
-        "oauthAccount": {"emailAddress": email, "organizationName": org, tier_key: tier},
-        "keep": "me",
-    }))
+    acct = {"emailAddress": email, "organizationName": org, tier_key: tier}
+    if org_uuid is not None:
+        acct["organizationUuid"] = org_uuid
+    env.claude_json.write_text(json.dumps({"oauthAccount": acct, "keep": "me"}))

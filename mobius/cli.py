@@ -140,7 +140,8 @@ def _cmd_list(_args) -> int:
         active = "●" if p.id == active_id else " "
         role = "primary " if i == 0 else f"fallback{i}"
         reauth = "  [재로그인 필요]" if p.needs_reauth else ""
-        print(f"{active} {role}  {p.nickname}  <{p.email_address}>  "
+        org = f"  [{p.organization_name}]" if p.organization_name else ""
+        print(f"{active} {role}  {p.nickname}  <{p.email_address}>{org}  "
               f"{p.tier_description}{_fmt_reset(p, now)}{reauth}")
         for line in _account_usage_lines(ctx, p, now):
             print(line)

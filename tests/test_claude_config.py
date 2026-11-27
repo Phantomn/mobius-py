@@ -8,7 +8,7 @@ def test_read_live_and_email(env):
     snap = io.read_live_snapshot()
     assert snap is not None and snap.credentials_blob == creds_blob("A")
     assert snap.oauth_account["emailAddress"] == "a@example.com"
-    assert io.live_email() == "a@example.com"
+    assert io.live_identity() == ("a@example.com", "")
 
 
 def test_read_live_none_when_logged_out(env):
@@ -37,8 +37,8 @@ def test_stable_snapshot_ok_when_unchanged(env):
     io = ClaudeConfigIO(env)
     result = io.read_stable_live_snapshot(gap=0)
     assert result is not None
-    _snap, email = result
-    assert email == "a@example.com"
+    _snap, ident = result
+    assert ident == ("a@example.com", "")
 
 
 def test_stable_snapshot_none_on_race(env, monkeypatch):

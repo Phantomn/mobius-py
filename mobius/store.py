@@ -14,7 +14,8 @@ from . import credentials
 from .env import MobiusEnvironment
 from .fsutil import write_atomic
 from .models import (AccountProfile, AccountSecrets, AccountsFile, AdvisoryRecord,
-                     CodexCredentialsSnapshot, CredentialsSnapshot, new_account_id)
+                     CodexCredentialsSnapshot, CredentialsSnapshot, new_account_id,
+                     oauth_identity)
 
 
 class AccountStoreError(Exception):
@@ -60,6 +61,7 @@ class AccountStore:
             except OSError:
                 pass
             raise
+        self._backfill_org_uuid()
 
     def save(self) -> None:
         data = json.dumps(self.file.to_dict()).encode("utf-8")
@@ -78,27 +80,59 @@ class AccountStore:
             self.file = AccountsFile.from_dict(json.loads(data))
         except Exception:
             return
+        self._backfill_org_uuid()
+
+    def _backfill_org_uuid(self) -> None:
+        """조직 UUID 없이 저장된 구버전 프로필을 자격 사본의 oauthAccount 로 채운다.
+
+        채우지 않으면 아래 find_claude_profile 의 구버전 와일드카드가 같은 이메일의 다른 조직
+        로그인까지 그 프로필로 흡수한다.
+        """
+        changed = False
+        for a in self.file.accounts:
+            if a.organization_uuid or not a.has_claude_credentials:
+                continue
+            try:
+                snap = self.secret(a.id)
+            except Exception:
+                continue  # 사본 손상: 채우기만 건너뛴다(로드를 막지 않는다)
+            ident = oauth_identity(snap.oauth_account) if snap else None
+            if ident and ident[1]:
+                a.organization_uuid = ident[1]
+                changed = True
+        if changed:
+            self.save()
+
+    def find_claude_profile(self, ident: tuple[str, str]) -> Optional[AccountProfile]:
+        """(이메일, 조직 UUID) 가 같은 프로필. 조직 UUID 미기록 프로필은 이메일로만 맞춘다."""
+        email, org = ident
+        same_email = [a for a in self.file.accounts if a.email_address == email]
+        return (next((a for a in same_email if a.organization_uuid == org), None)
+                or next((a for a in same_email if not a.organization_uuid), None))
 
     # ---------- 프로필 ----------
 
     def upsert_profile(self, nickname: str, snapshot: CredentialsSnapshot) -> AccountProfile:
         block = snapshot.oauth_account
-        if not block or not isinstance(block.get("emailAddress"), str):
+        ident = oauth_identity(block)
+        if block is None or ident is None:
             raise SnapshotMissingEmail()
-        email = block["emailAddress"]
+        email, org_uuid = ident
         org = str(block.get("organizationName") or "")
         tier = _tier_description(block)
 
-        existing = next((a for a in self.file.accounts if a.email_address == email), None)
+        existing = self.find_claude_profile(ident)
         if existing is not None:
             existing.nickname = nickname
             existing.organization_name = org
+            existing.organization_uuid = org_uuid
             existing.tier_description = tier
             existing.needs_reauth = False
             profile = existing
         else:
             profile = AccountProfile(id=new_account_id(), nickname=nickname,
                                      email_address=email, organization_name=org,
+                                     organization_uuid=org_uuid,
                                      tier_description=tier)
             self.file.accounts.append(profile)
             if self.file.active_account_id is None:

@@ -1,6 +1,6 @@
 """계정 전환 엔진 — Switcher.swift 포팅.
 
-순서: 라이브 되저장 → 대상 기록 → 실패 시 롤백. reconcile/adopt는 이메일(승인창 없음)로
+순서: 라이브 되저장 → 대상 기록 → 실패 시 롤백. reconcile/adopt는 (이메일, 조직 UUID)(승인창 없음)로
 먼저 판별하고 실제 변화가 있을 때만 자격증명을 만진다.
 """
 
@@ -27,14 +27,14 @@ class Switcher:
         self.codex_io = codex_io or CodexConfigIO(store.env.home)
 
     def resave_live_into_matching_profile(self) -> Optional[str]:
-        """현재 라이브 상태를, email이 일치하는 프로필에 되저장한다. 반환: 프로필 id."""
+        """현재 라이브 상태를, (이메일, 조직)이 일치하는 프로필에 되저장한다. 반환: 프로필 id."""
         live = self.io.read_live_snapshot()
         if live is None:
             return None
-        email = self.io.live_email()
-        if email is None:
+        ident = self.io.live_identity()
+        if ident is None:
             return None
-        profile = next((a for a in self.store.file.accounts if a.email_address == email), None)
+        profile = self.store.find_claude_profile(ident)
         if profile is None:
             return None
         self.store.set_secret(live, profile.id)
@@ -48,17 +48,17 @@ class Switcher:
         읽지 않는다(임계값 폴이 이 계약에 얹힌다). 그래서 이 불리언은 **신선도 계약** 자체다 —
         쓰기가 실패했는데 True 를 돌려주면 호출자가 낡은 스냅샷을 신선하다고 믿고 조용히 틀린다.
         """
-        email = self.io.live_email()
-        if email is None:
+        ident = self.io.live_identity()
+        if ident is None:
             return False
-        profile = next((a for a in self.store.file.accounts if a.email_address == email), None)
+        profile = self.store.find_claude_profile(ident)
         if profile is None or profile.id != self.store.file.active_account_id:
             return False
         stable = self.io.read_stable_live_snapshot()
         if stable is None:
             return False
-        live, stable_email = stable
-        if stable_email != email:
+        live, stable_ident = stable
+        if stable_ident != ident:
             return False
         try:
             self.store.set_secret(live, profile.id)
@@ -105,16 +105,19 @@ class Switcher:
 
     def adopt_live_account_if_unregistered(self) -> Optional[AccountProfile]:
         """현재 claude 로그인 계정이 미등록이면 자동 흡수(부트스트랩)."""
-        email = self.io.live_email()
-        if email is None or any(a.email_address == email for a in self.store.file.accounts):
+        ident = self.io.live_identity()
+        if ident is None or self.store.find_claude_profile(ident) is not None:
             return None
         stable = self.io.read_stable_live_snapshot()
         if stable is None:
             return None
-        live, stable_email = stable
-        if stable_email != email:
+        live, stable_ident = stable
+        if stable_ident != ident:
             return None
-        nickname = email.split("@", 1)[0] or "account"
+        nickname = ident[0].split("@", 1)[0] or "account"
+        # 같은 이메일의 다른 조직(팀/개인)이 이미 이 이름을 쓰면 switch 가 하나만 찾는다.
+        if any(a.nickname == nickname for a in self.store.file.accounts):
+            nickname = f"{nickname}-{ident[1][:8] or 'noorg'}"
         profile = self.store.upsert_profile(nickname, live)
         self.store.set_active(profile.id)
         return profile
@@ -152,16 +155,16 @@ class Switcher:
             self.store.save()
 
     def reconcile(self) -> None:
-        """외부 재로그인 감지 시 상태 대사: 라이브 email이 아는 프로필이면 활성 표시+토큰 흡수."""
+        """외부 재로그인 감지 시 상태 대사: 라이브 (이메일, 조직)이 아는 프로필이면 활성 표시+토큰 흡수."""
         active = self.store.file.active
         # Codex-only 계정이 활성인 동안 Claude의 이전 라이브 자격을 보고 active를 되돌리면
         # 통합 계정 풀의 switch 결과가 매 list/status 호출마다 사라진다.
         if active is not None and self.store.secret(active.id) is None:
             return
-        email = self.io.live_email()
-        if email is None:
+        ident = self.io.live_identity()
+        if ident is None:
             return
-        profile = next((a for a in self.store.file.accounts if a.email_address == email), None)
+        profile = self.store.find_claude_profile(ident)
         if profile is None:
             return
         active_unchanged = self.store.file.active_account_id == profile.id
@@ -174,8 +177,8 @@ class Switcher:
         stable = self.io.read_stable_live_snapshot()
         if stable is None:
             return
-        live, stable_email = stable
-        if stable_email != email:
+        live, stable_ident = stable
+        if stable_ident != ident:
             return
         self.store.set_secret(live, profile.id)
         if not active_unchanged:

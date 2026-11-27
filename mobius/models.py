@@ -78,6 +78,8 @@ class AccountProfile:
     nickname: str
     email_address: str
     organization_name: str = ""
+    # 같은 이메일로 팀/개인 조직에 각각 로그인할 수 있다. Claude 계정 식별은 (이메일, 조직 UUID).
+    organization_uuid: str = ""
     tier_description: str = ""
     needs_reauth: bool = False
     rate_limit: Optional[RateLimitInfo] = None
@@ -101,6 +103,7 @@ class AccountProfile:
             "nickname": self.nickname,
             "emailAddress": self.email_address,
             "organizationName": self.organization_name,
+            "organizationUUID": self.organization_uuid,
             "tierDescription": self.tier_description,
             "needsReauth": self.needs_reauth,
             "rateLimit": self.rate_limit.to_dict() if self.rate_limit else None,
@@ -125,6 +128,7 @@ class AccountProfile:
             nickname=str(d["nickname"]),
             email_address=str(d["emailAddress"]),
             organization_name=str(d.get("organizationName", "")),
+            organization_uuid=str(d.get("organizationUUID", "")),
             tier_description=str(d.get("tierDescription", "")),
             needs_reauth=bool(d.get("needsReauth", False)),
             rate_limit=RateLimitInfo.from_dict(rl) if rl else None,
@@ -340,6 +344,13 @@ class UsageSnapshot:
                                    (self.seven_day_percent, self.seven_day_resets_at))
                   if pct is not None and pct >= 100 and r is not None and r > now]
         return max(resets) if resets else None
+
+
+def oauth_identity(block: Optional[dict]) -> Optional[tuple[str, str]]:
+    """oauthAccount 블록의 Claude 계정 식별 키 (이메일, 조직 UUID). 이메일이 없으면 None."""
+    if not block or not isinstance(block.get("emailAddress"), str):
+        return None
+    return (block["emailAddress"], str(block.get("organizationUuid") or ""))
 
 
 def new_account_id() -> str:
