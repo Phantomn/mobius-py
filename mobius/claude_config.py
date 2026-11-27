@@ -12,7 +12,7 @@ from typing import Optional
 
 from .env import MobiusEnvironment
 from .fsutil import write_atomic
-from .models import CredentialsSnapshot
+from .models import CredentialsSnapshot, oauth_identity
 
 
 class MalformedClaudeJSON(Exception):
@@ -50,22 +50,19 @@ class ClaudeConfigIO:
         acct = obj.get("oauthAccount")
         return acct if isinstance(acct, dict) else None
 
-    def live_email(self) -> Optional[str]:
-        acct = self.read_oauth_account_dict()
-        if not acct:
-            return None
-        email = acct.get("emailAddress")
-        return email if isinstance(email, str) else None
+    def live_identity(self) -> Optional[tuple[str, str]]:
+        """라이브 로그인의 (이메일, 조직 UUID). 로그아웃이면 None."""
+        return oauth_identity(self.read_oauth_account_dict())
 
     def read_stable_live_snapshot(self, gap: float = 0.7):
         """토큰+이메일을 간격 두고 두 번 읽어 **값이 일치할 때만** 반환한다.
 
         로그인/전환 도중 토큰과 이메일이 순차 갱신되는 찰나엔 두 읽기가 달라지므로 None을
-        반환해 "새 토큰 + 옛 이메일" 오저장을 막는다(실패기록 2·9). 반환: (snapshot, email).
+        반환해 "새 토큰 + 옛 이메일" 오저장을 막는다(실패기록 2·9). 반환: (snapshot, (이메일, 조직 UUID)).
         """
         s1 = self.read_live_snapshot()
         try:
-            e1 = self.live_email()
+            e1 = self.live_identity()
         except MalformedClaudeJSON:
             return None
         if s1 is None or e1 is None:
@@ -73,7 +70,7 @@ class ClaudeConfigIO:
         time.sleep(gap)
         s2 = self.read_live_snapshot()
         try:
-            e2 = self.live_email()
+            e2 = self.live_identity()
         except MalformedClaudeJSON:
             return None
         if s2 is None or e2 is None:
