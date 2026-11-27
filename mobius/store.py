@@ -35,7 +35,9 @@ class UnknownAccount(AccountStoreError):
 
 
 def _tier_description(block: dict) -> str:
-    tier = block.get("organizationRateLimitTier") or block.get("organizationType") or ""
+    # 2026-11-27 실측: 요금제 키 중 개인 Ultra 계정에는 planDisplayName, 같은 이메일의 팀 계정에는 seatTier 만 있었다.
+    tier = (block.get("organizationRateLimitTier") or block.get("organizationType")
+            or block.get("planDisplayName") or block.get("seatTier") or "")
     s = (str(tier)
          .replace("default_", "")
          .replace("claude_", "")
@@ -61,7 +63,7 @@ class AccountStore:
             except OSError:
                 pass
             raise
-        self._backfill_org_uuid()
+        self._backfill_from_secret()
 
     def save(self) -> None:
         data = json.dumps(self.file.to_dict()).encode("utf-8")
@@ -80,25 +82,30 @@ class AccountStore:
             self.file = AccountsFile.from_dict(json.loads(data))
         except Exception:
             return
-        self._backfill_org_uuid()
+        self._backfill_from_secret()
 
-    def _backfill_org_uuid(self) -> None:
-        """조직 UUID 없이 저장된 구버전 프로필을 자격 사본의 oauthAccount 로 채운다.
+    def _backfill_from_secret(self) -> None:
+        """조직 UUID 나 요금제 없이 저장된 프로필을 자격 사본의 oauthAccount 로 채운다.
 
         채우지 않으면 아래 find_claude_profile 의 구버전 와일드카드가 같은 이메일의 다른 조직
         로그인까지 그 프로필로 흡수한다.
         """
         changed = False
         for a in self.file.accounts:
-            if a.organization_uuid or not a.has_claude_credentials:
+            if (a.organization_uuid and a.tier_description) or not a.has_claude_credentials:
                 continue
             try:
                 snap = self.secret(a.id)
             except Exception:
                 continue  # 사본 손상: 채우기만 건너뛴다(로드를 막지 않는다)
-            ident = oauth_identity(snap.oauth_account) if snap else None
-            if ident and ident[1]:
+            block = snap.oauth_account if snap else None
+            ident = oauth_identity(block)
+            if ident and ident[1] and not a.organization_uuid:
                 a.organization_uuid = ident[1]
+                changed = True
+            tier = _tier_description(block) if block else ""
+            if tier and not a.tier_description:
+                a.tier_description = tier
                 changed = True
         if changed:
             self.save()
