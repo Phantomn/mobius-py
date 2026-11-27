@@ -63,3 +63,21 @@ def test_legacy_profile_backfilled_from_secret(env):
     assert store.file.accounts[0].organization_uuid == "org-personal"
     team = _capture(env, store, io, "team", tag="T", email="me@x.com", org_uuid="org-team")
     assert team.id != old.id and len(store.file.accounts) == 2
+
+
+def test_tier_falls_back_to_plan_and_seat(env):
+    store, io = AccountStore(env), ClaudeConfigIO(env)
+    write_live(env, tag="P", email="me@x.com", org_uuid="org-p", tier_key="planDisplayName", tier="Ultra")
+    assert store.upsert_profile("personal", io.read_live_snapshot()).tier_description == "Ultra"
+    write_live(env, tag="T", email="me@x.com", org_uuid="org-t", tier_key="seatTier", tier="team_tier_1")
+    assert store.upsert_profile("team", io.read_live_snapshot()).tier_description == "Team Tier 1"
+
+
+def test_blank_tier_backfilled_from_secret(env):
+    store, io = AccountStore(env), ClaudeConfigIO(env)
+    _capture(env, store, io, "personal", tag="P", email="me@x.com", org_uuid="org-p",
+             tier_key="planDisplayName", tier="Ultra")
+    data = json.loads(env.accounts_file.read_bytes())
+    data["accounts"][0]["tierDescription"] = ""  # 수정 전 코드가 저장한 빈 요금제
+    env.accounts_file.write_text(json.dumps(data))
+    assert AccountStore(env).file.accounts[0].tier_description == "Ultra"
